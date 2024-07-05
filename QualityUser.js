@@ -1,6 +1,8 @@
 <script>
 // Переменная для номера счётчика метрики
 var METRIKA_COUNTER_ID = 12345678; // Используем номер существующего счётчика
+// Переменная для цели метрики
+var METRIKA_TARGET = 'QualityUser';
 
 // Период времени (в миллисекундах), в течение которого пользователь должен провести на сайте
 var MIN_TIME_ON_SITE = 30000; // Например, 30 секунд
@@ -30,7 +32,7 @@ function trackInterestedUser() {
   var timeOnSite = currentTime - startTime;
 
   if (isUserActive && (timeOnSite >= MIN_TIME_ON_SITE || textSelected || deviceMotionDetected || deviceOrientationDetected) && !isBot() && isWithinDailyLimit()) {
-    ym(METRIKA_COUNTER_ID, 'reachGoal', 'InterestedUser');
+    ym(METRIKA_COUNTER_ID, 'reachGoal', METRIKA_TARGET);
     incrementDailyCounter();
   }
 }
