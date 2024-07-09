@@ -1,18 +1,28 @@
 <script>
-// Переменная для номера счётчика метрики
+// Конфигурация метрики
 var METRIKA_COUNTER_ID = 12345678; // Используем номер существующего счётчика
-// Переменная для цели метрики
 var METRIKA_TARGET = 'QualityUser';
 
 // Период времени (в миллисекундах), в течение которого пользователь должен провести на сайте
 var MIN_TIME_ON_SITE = 30000; // Например, 30 секунд
 
-// Переменные для времени и активности пользователя
+// Переменные для отслеживания состояния
 var startTime;
 var isUserActive = false;
 var textSelected = false;
 var deviceMotionDetected = false;
 var deviceOrientationDetected = false;
+
+// Переменные для отслеживания действий пользователя
+var mouseMovements = [];
+var scrollEvents = [];
+var interactionEvents = [];
+
+// Пороговые значения
+var movementThreshold = 10;
+var maxMouseMovements = 100;
+var maxScrollEvents = 50;
+var maxInteractionEvents = 200;
 
 // Проверка поддержки localStorage
 function supportsLocalStorage() {
@@ -52,13 +62,27 @@ function isBot() {
     function() { return !!window.callPhantom || !!window._phantom || !!window.phantom; }, // PhantomJS
     function() { return !!window.__nightmare; }, // Nightmare.js
     function() { return !!document.__selenium_unwrapped || !!document.__webdriver_script_fn || !!window.__nightmare; }, // Selenium
-    function() { return !!navigator.plugins && navigator.plugins.length === 0; } // Headless Chrome
+    function() { return isHeadless(); }, // Дополнительная проверка на headless
+    function() { return hasSpecificBotProperties(); }, // Проверка на специфические свойства
+    function() { return isUsingProxy(); }, // Проверка на использование прокси
+    function() { return hasSuspiciousBehavior(); } // Проверка на подозрительное поведение
   ];
+
   var isSuspiciousBehavior = suspiciousBehaviors.some(function(check) {
     return check();
   });
 
-  return isBot || isSuspiciousBehavior || isUsingProxy();
+  return isBot || isSuspiciousBehavior;
+}
+
+// Функция для проверки headless браузеров
+function isHeadless() {
+  return /HeadlessChrome/.test(window.navigator.userAgent) || /Googlebot/.test(window.navigator.userAgent) || (navigator.webdriver && !window.chrome);
+}
+
+// Функция для проверки специфических свойств ботов
+function hasSpecificBotProperties() {
+  return !!window._phantom || !!window.callPhantom || !!window.__nightmare || !!window.__selenium_unwrapped || !!document.__webdriver_script_fn;
 }
 
 // Функция для определения использования прокси
@@ -117,6 +141,118 @@ function isUsingProxy() {
   return usingProxy;
 }
 
+// Функция для проверки подозрительного поведения
+function hasSuspiciousBehavior() {
+  return hasSuspiciousMouseMovements() || hasSuspiciousScrollBehavior() || hasSuspiciousRequestFrequency();
+}
+
+// Функция для проверки подозрительных движений мыши
+function hasSuspiciousMouseMovements() {
+  var suspicious = false;
+  var lastX, lastY;
+  var movementHistory = [];
+  var maxHistoryLength = 20;
+
+  window.addEventListener('mousemove', function(event) {
+    if (lastX !== undefined && lastY !== undefined) {
+      var deltaX = Math.abs(event.clientX - lastX);
+      var deltaY = Math.abs(event.clientY - lastY);
+
+      movementHistory.push({ deltaX: deltaX, deltaY: deltaY });
+
+      if (movementHistory.length > maxHistoryLength) {
+        movementHistory.shift();
+      }
+
+      if (deltaX < movementThreshold && deltaY < movementThreshold) {
+        suspicious = true;
+      }
+
+      if (movementHistory.length === maxHistoryLength) {
+        var totalDeltaX = movementHistory.reduce(function(sum, move) { return sum + move.deltaX; }, 0);
+        var totalDeltaY = movementHistory.reduce(function(sum, move) { return sum + move.deltaY; }, 0);
+        var averageDeltaX = totalDeltaX / movementHistory.length;
+        var averageDeltaY = totalDeltaY / movementHistory.length;
+
+        var varianceX = movementHistory.reduce(function(sum, move) { return sum + Math.pow(move.deltaX - averageDeltaX, 2); }, 0) / movementHistory.length;
+        var varianceY = movementHistory.reduce(function(sum, move) { return sum + Math.pow(move.deltaY - averageDeltaY, 2); }, 0) / movementHistory.length;
+
+        if (varianceX < 1 && varianceY < 1) {
+          suspicious = true;
+        }
+      }
+    }
+    lastX = event.clientX;
+    lastY = event.clientY;
+  });
+
+  return suspicious;
+}
+
+// Функция для проверки подозрительного поведения прокрутки
+function hasSuspiciousScrollBehavior() {
+  var suspicious = false;
+  var lastScrollY;
+  var scrollHistory = [];
+  var maxHistoryLength = 20;
+
+  window.addEventListener('scroll', function() {
+    var currentScrollY = window.scrollY || window.pageYOffset;
+
+    if (lastScrollY !== undefined) {
+      var deltaY = Math.abs(currentScrollY - lastScrollY);
+
+      scrollHistory.push(deltaY);
+
+      if (scrollHistory.length > maxHistoryLength) {
+        scrollHistory.shift();
+      }
+
+      if (deltaY < movementThreshold) {
+        suspicious = true;
+      }
+
+      if (scrollHistory.length === maxHistoryLength) {
+        var totalDeltaY = scrollHistory.reduce(function(sum, deltaY) { return sum + deltaY; }, 0);
+        var averageDeltaY = totalDeltaY / scrollHistory.length;
+
+        var varianceY = scrollHistory.reduce(function(sum, deltaY) { return sum + Math.pow(deltaY - averageDeltaY, 2); }, 0) / scrollHistory.length;
+
+        if (varianceY < 1) {
+          suspicious = true;
+        }
+      }
+    }
+    lastScrollY = currentScrollY;
+  });
+
+  return suspicious;
+}
+
+// Функция для проверки подозрительной частоты запросов
+function hasSuspiciousRequestFrequency() {
+  var requests = [];
+  var requestLimit = 10; // Лимит запросов в минуту
+  var timeLimit = 60000; // Временной лимит в миллисекундах
+
+  function logRequest() {
+    var now = Date.now();
+    requests.push(now);
+    requests = requests.filter(function(timestamp) {
+      return now - timestamp < timeLimit;
+    });
+    return requests.length > requestLimit;
+  }
+
+  window.addEventListener('load', logRequest);
+  window.addEventListener('mousemove', logRequest);
+  window.addEventListener('scroll', logRequest);
+  window.addEventListener('keydown', logRequest);
+  window.addEventListener('touchstart', logRequest);
+
+  return logRequest();
+}
+
 // Хранилище для счетчика срабатываний цели в день
 var dailyCounterStorageKey = 'interested_user_daily_counter';
 var maxGoalCountPerDay = 3;
@@ -160,8 +296,7 @@ function handleUserActivity() {
 
 // Обработчик события, который вызывается при выделении текста
 function handleTextSelection() {
-  var selection = window.getSelection();
-  if (selection.toString().length > 0) {
+  if (window.getSelection().toString().length > 0) {
     textSelected = true;
     trackInterestedUser();
   }
@@ -175,7 +310,7 @@ function throttle(fn, wait) {
       fn();
       time = Date.now();
     }
-  }
+  };
 }
 
 // Обработчик события для devicemotion
