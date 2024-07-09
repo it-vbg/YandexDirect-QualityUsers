@@ -59,11 +59,7 @@ function isBot() {
   var suspiciousBehaviors = [
     function() { return window.innerWidth === 0 && window.innerHeight === 0; }, // Скрытый iframe
     function() { return navigator.webdriver; }, // Headless браузер
-    function() { return !!window.callPhantom || !!window._phantom || !!window.phantom; }, // PhantomJS
-    function() { return !!window.__nightmare; }, // Nightmare.js
-    function() { return !!document.__selenium_unwrapped || !!document.__webdriver_script_fn || !!window.__nightmare; }, // Selenium
     function() { return isHeadless(); }, // Дополнительная проверка на headless
-    function() { return hasSpecificBotProperties(); }, // Проверка на специфические свойства
     function() { return isUsingProxy(); }, // Проверка на использование прокси
     function() { return hasSuspiciousBehavior(); } // Проверка на подозрительное поведение
   ];
@@ -80,16 +76,9 @@ function isHeadless() {
   return /HeadlessChrome/.test(window.navigator.userAgent) || /Googlebot/.test(window.navigator.userAgent) || (navigator.webdriver && !window.chrome);
 }
 
-// Функция для проверки специфических свойств ботов
-function hasSpecificBotProperties() {
-  return !!window._phantom || !!window.callPhantom || !!window.__nightmare || !!window.__selenium_unwrapped || !!document.__webdriver_script_fn;
-}
-
 // Функция для определения использования прокси
 function isUsingProxy() {
-  var usingProxy = false;
-  
-  // Проверка наличия специфических заголовков HTTP
+  // Данный метод можно оставить, но стоит учитывать его ограниченную эффективность
   var proxyHeaders = [
     'HTTP_X_FORWARDED_FOR', 
     'HTTP_X_FORWARDED', 
@@ -100,45 +89,9 @@ function isUsingProxy() {
     'HTTP_X_REAL_IP' // Добавлен дополнительный заголовок
   ];
 
-  proxyHeaders.forEach(function(header) {
-    if (window.navigator[header] !== undefined) {
-      usingProxy = true;
-    }
+  return proxyHeaders.some(function(header) {
+    return window.navigator[header] !== undefined;
   });
-
-  // Дополнительная проверка по IP-адресам
-  var proxyIPRanges = [
-    '10.0.0.0/8',  // Частные сети
-    '172.16.0.0/12',
-    '192.168.0.0/16'
-  ];
-
-  function isInRange(ip, range) {
-    var rangeParts = range.split('/');
-    var rangeIP = rangeParts[0];
-    var subnet = parseInt(rangeParts[1]);
-    var ipParts = ip.split('.').map(Number);
-    var rangeIPParts = rangeIP.split('.').map(Number);
-    var mask = ~(Math.pow(2, 32 - subnet) - 1);
-
-    function ipToLong(ipParts) {
-      return ipParts.reduce(function(acc, part, index) {
-        return acc + (part << (24 - 8 * index));
-      }, 0);
-    }
-
-    return (ipToLong(ipParts) & mask) === (ipToLong(rangeIPParts) & mask);
-  }
-
-  var userIP = window.navigator.userAgentData && window.navigator.userAgentData.platform ? window.navigator.userAgentData.platform : ''; // Placeholder for actual IP
-
-  if (proxyIPRanges.some(function(range) {
-    return isInRange(userIP, range);
-  })) {
-    usingProxy = true;
-  }
-
-  return usingProxy;
 }
 
 // Функция для проверки подозрительного поведения
@@ -162,10 +115,6 @@ function hasSuspiciousMouseMovements() {
 
       if (movementHistory.length > maxHistoryLength) {
         movementHistory.shift();
-      }
-
-      if (deltaX < movementThreshold && deltaY < movementThreshold) {
-        suspicious = true;
       }
 
       if (movementHistory.length === maxHistoryLength) {
@@ -206,10 +155,6 @@ function hasSuspiciousScrollBehavior() {
 
       if (scrollHistory.length > maxHistoryLength) {
         scrollHistory.shift();
-      }
-
-      if (deltaY < movementThreshold) {
-        suspicious = true;
       }
 
       if (scrollHistory.length === maxHistoryLength) {
