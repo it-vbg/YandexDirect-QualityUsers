@@ -742,7 +742,7 @@
   // отдельный параметр цели/userParams для сегментации.
   document.addEventListener('mouseleave', function (e) {
     if (e.clientY <= 0) exitIntent = true;
-  });
+  }, { passive: true });
 
   // Перед уходом со страницы сохраняем internalNavClicks в storage,
   // чтобы на следующей MPA-странице счётчик подхватился. Дублируем
