@@ -5,13 +5,15 @@
   // ===== Конфигурация =====
   var METRIKA_COUNTER_ID = 12345678;          // ID счётчика Яндекс Метрики
   var METRIKA_TARGET = 'QualityUser';         // Имя цели (должно совпадать с настройкой в Метрике)
-  var MIN_TIME_ON_SITE = 30000;               // Порог времени на сайте, мс
+  var MIN_TIME_ON_SITE = 30000;               // Минимальное ВИДИМОЕ время на сайте, мс
+  var MIN_ACTIVE_TIME = 15000;                // Минимальное АКТИВНОЕ время (без idle), мс
+  var IDLE_THRESHOLD = 30000;                 // После сколько мс простоя счётчик активности встаёт на паузу
 
   var DAILY_STORAGE_KEY = 'interested_user_daily_counter';
+  var VISIT_COUNT_KEY = 'interested_user_visit_count';
   var MAX_GOAL_COUNT_PER_DAY = 3;
 
   // ===== Состояние сессии =====
-  var startTime = 0;
   var isUserActive = false;
   var textSelected = false;
   var hasScrolled = false;
@@ -19,6 +21,16 @@
   var deviceMotionDetected = false;
   var deviceOrientationDetected = false;
   var goalReachedThisSession = false;
+  var maxScrollDepth = 0;             // Доля прокрученного документа от 0 до 1
+
+  // Счётчик видимого времени: тикает только пока вкладка в foreground.
+  var visibleTimeAccumulated = 0;
+  var lastVisibleStart = (typeof document !== 'undefined' && document.visibilityState === 'visible') ? Date.now() : 0;
+
+  // Счётчик активного времени: тикает только пока вкладка видима И последняя
+  // активность была не дольше IDLE_THRESHOLD назад.
+  var activeTime = 0;
+  var lastActivityAt = Date.now();
 
   // Флаги подозрительного поведения. Заполняются единожды зарегистрированными
   // listener-ами ниже; isBot() только читает их состояние.
@@ -70,6 +82,49 @@
 
   function isWithinDailyLimit() {
     return getDailyCount() < MAX_GOAL_COUNT_PER_DAY;
+  }
+
+  // Счётчик визитов в этом браузере. Инкрементируется один раз при загрузке
+  // скрипта и используется как параметр цели — вернувшийся пользователь это
+  // более тёплый сигнал. SPA-навигация не считается за новый визит, потому
+  // что скрипт перевыполняется только при reload/новой странице.
+  function bumpVisitCount() {
+    if (!supportsLocalStorage()) return 1;
+    var raw = localStorage.getItem(VISIT_COUNT_KEY);
+    var n = parseInt(raw, 10);
+    if (!(n >= 0)) n = 0;
+    n += 1;
+    localStorage.setItem(VISIT_COUNT_KEY, String(n));
+    return n;
+  }
+  var visitCount = bumpVisitCount();
+
+  // ===== Время видимости и активности =====
+  function getVisibleTime() {
+    return visibleTimeAccumulated + (lastVisibleStart ? Date.now() - lastVisibleStart : 0);
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') {
+      lastVisibleStart = Date.now();
+    } else if (lastVisibleStart) {
+      visibleTimeAccumulated += Date.now() - lastVisibleStart;
+      lastVisibleStart = 0;
+    }
+  });
+
+  // Тик активного времени: раз в секунду, только если вкладка видима и
+  // активность была недавно. Это даёт честную метрику внимания, а не просто
+  // «вкладка открыта».
+  setInterval(function () {
+    if (document.visibilityState !== 'visible') return;
+    if (Date.now() - lastActivityAt < IDLE_THRESHOLD) {
+      activeTime += 1000;
+    }
+  }, 1000);
+
+  function bumpActivity() {
+    lastActivityAt = Date.now();
   }
 
   // ===== Детекция ботов =====
@@ -127,6 +182,7 @@
 
     window.addEventListener('mousemove', function (event) {
       hasMouseMoved = true;
+      bumpActivity();
       if (lastX !== undefined && lastY !== undefined) {
         history.push({
           dx: Math.abs(event.clientX - lastX),
@@ -166,6 +222,17 @@
 
     window.addEventListener('scroll', function () {
       hasScrolled = true;
+      bumpActivity();
+
+      // Глубина прочтения: максимум за сессию, в долях документа.
+      var doc = document.documentElement || document.body;
+      var total = doc ? doc.scrollHeight : 0;
+      if (total > 0) {
+        var scrolled = (window.scrollY || window.pageYOffset || 0) + (window.innerHeight || 0);
+        var depth = scrolled / total;
+        if (depth > maxScrollDepth) maxScrollDepth = depth > 1 ? 1 : depth;
+      }
+
       var y = window.scrollY || window.pageYOffset;
       if (lastY !== undefined) {
         history.push(Math.abs(y - lastY));
@@ -213,56 +280,82 @@
   // goalReachedThisSession — сессионный (in-memory) флаг: при перезагрузке
   // вкладки сбрасывается, при SPA-навигации сохраняется. Жёсткий cap — это
   // дневной счётчик в localStorage.
+  //
+  // Семантика «качественного пользователя»:
+  //  1) видимое время на сайте >= MIN_TIME_ON_SITE (фоновые вкладки не идут в зачёт),
+  //  2) активное время >= MIN_ACTIVE_TIME (idle-периоды не идут в зачёт),
+  //  3) хотя бы один признак реальной активности (живой сигнал).
+  // Все три условия — AND.
   function trackInterestedUser() {
     if (goalReachedThisSession) return;
     if (!isUserActive) return;
 
-    var timeOnSite = Date.now() - startTime;
-
-    // Семантика «качественного пользователя»: время на сайте — обязательный
-    // минимальный фильтр, плюс хотя бы один признак реальной активности
-    // (скролл, движение мыши, выделение текста, вращение/движение устройства).
-    // Открыл и забыл вкладку без скролла — не цель.
+    var visibleMs = getVisibleTime();
     var liveSignal = hasScrolled
       || hasMouseMoved
       || textSelected
       || deviceMotionDetected
       || deviceOrientationDetected;
-    var engaged = timeOnSite >= MIN_TIME_ON_SITE && liveSignal;
+    var engaged = visibleMs >= MIN_TIME_ON_SITE
+      && activeTime >= MIN_ACTIVE_TIME
+      && liveSignal;
 
     if (!engaged) return;
     if (isBot()) return;
     if (!isWithinDailyLimit()) return;
     if (typeof window.ym !== 'function') return;
 
-    window.ym(METRIKA_COUNTER_ID, 'reachGoal', METRIKA_TARGET);
+    // Параметры цели — для сегментации в Метрике и обучения автостратегий
+    // Директа на распределении, а не на бинарном «сработала/нет».
+    var params = {
+      visible_time_sec: Math.round(visibleMs / 1000),
+      active_time_sec: Math.round(activeTime / 1000),
+      scroll_depth_pct: Math.round(maxScrollDepth * 100),
+      visit_count: visitCount,
+      text_selected: textSelected ? 1 : 0
+    };
+
+    window.ym(METRIKA_COUNTER_ID, 'reachGoal', METRIKA_TARGET, params);
     incrementDailyCount();
     goalReachedThisSession = true;
   }
 
   // ===== Обработчики активности =====
   function handleUserActivity() {
+    bumpActivity();
     if (isUserActive) return;
     isUserActive = true;
-    startTime = Date.now();
-    setTimeout(trackInterestedUser, MIN_TIME_ON_SITE);
+    // Периодически проверяем условия цели. Один setTimeout под фиксированный
+    // порог не годится: visibleTime и activeTime растут не линейно от часов
+    // на стене (фоновые вкладки/idle их останавливают), поэтому опрашиваем
+    // условие каждые 5 секунд, пока цель не сработает или сессия не закончится.
+    var iv = setInterval(function () {
+      if (goalReachedThisSession) {
+        clearInterval(iv);
+        return;
+      }
+      trackInterestedUser();
+    }, 5000);
   }
 
   function handleTextSelection() {
     var sel = window.getSelection && window.getSelection();
     if (sel && sel.toString().length > 0) {
       textSelected = true;
+      bumpActivity();
       trackInterestedUser();
     }
   }
 
   function handleDeviceMotion() {
     deviceMotionDetected = true;
+    bumpActivity();
     trackInterestedUser();
   }
 
   function handleDeviceOrientation() {
     deviceOrientationDetected = true;
+    bumpActivity();
     trackInterestedUser();
   }
 
@@ -286,6 +379,11 @@
   for (var i = 0; i < activityEvents.length; i++) {
     window.addEventListener(activityEvents[i], handleUserActivity, { once: true, passive: true });
   }
+  // Дополнительный listener на тех же событиях — без { once: true }, чтобы
+  // постоянно обновлять lastActivityAt для счётчика активного времени.
+  window.addEventListener('keydown', bumpActivity);
+  window.addEventListener('touchstart', bumpActivity, { passive: true });
+  window.addEventListener('click', bumpActivity, { passive: true });
 
   document.addEventListener('selectionchange', handleTextSelection);
 
@@ -293,7 +391,7 @@
   // требуют DeviceMotionEvent.requestPermission() из user gesture, поэтому
   // без явного UI-разрешения флаги не сработают. На десктопах событий нет
   // вовсе. Это вспомогательный сигнал — основной канал срабатывания цели —
-  // время на сайте + выделение текста.
+  // visible/active time + скролл/мышь.
   window.addEventListener('devicemotion', throttle(handleDeviceMotion, 1000));
   window.addEventListener('deviceorientation', throttle(handleDeviceOrientation, 1000));
 
