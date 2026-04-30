@@ -14,6 +14,7 @@
   var LAST_VISIT_AT_KEY = 'interested_user_last_visit_at';
   var QUALITY_TOTAL_KEY = 'interested_user_quality_total';
   var QUALITY_SCORE_MAX_KEY = 'interested_user_quality_score_max';
+  var QUALITY_INTERNAL_NAV_MAX_KEY = 'interested_user_quality_internal_nav_max';
   var INTERNAL_NAV_KEY = 'interested_user_internal_nav';     // { count, ts } TTL 5 мин
   var INTERNAL_NAV_TTL_MS = 5 * 60 * 1000;
   // 30 минут — это и стандартный visit-gap в самой Яндекс Метрике, поэтому
@@ -608,19 +609,23 @@
     var roundedScore = Math.round(score);
     var totalQuality = 1;
     var maxScore = roundedScore;
+    var maxInternalNav = internalNavClicks;
     if (supportsLocalStorage()) {
       totalQuality = (parseInt(localStorage.getItem(QUALITY_TOTAL_KEY), 10) || 0) + 1;
       var prevMax = parseInt(localStorage.getItem(QUALITY_SCORE_MAX_KEY), 10) || 0;
-      if (roundedScore > prevMax) maxScore = roundedScore;
-      else maxScore = prevMax;
+      maxScore = roundedScore > prevMax ? roundedScore : prevMax;
+      var prevNavMax = parseInt(localStorage.getItem(QUALITY_INTERNAL_NAV_MAX_KEY), 10) || 0;
+      maxInternalNav = internalNavClicks > prevNavMax ? internalNavClicks : prevNavMax;
       localStorage.setItem(QUALITY_TOTAL_KEY, String(totalQuality));
       localStorage.setItem(QUALITY_SCORE_MAX_KEY, String(maxScore));
+      localStorage.setItem(QUALITY_INTERNAL_NAV_MAX_KEY, String(maxInternalNav));
     }
     window.ym(METRIKA_COUNTER_ID, 'userParams', {
       quality_score_last: roundedScore,
       quality_score_max: maxScore,
       quality_visits_total: totalQuality,
       quality_internal_nav_last: internalNavClicks,
+      quality_internal_nav_max: maxInternalNav,
       quality_reading_pct_last: Math.round(readingProgress() * 100)
     });
 

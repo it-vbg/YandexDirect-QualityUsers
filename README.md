@@ -57,7 +57,8 @@
 | `quality_score_last` | Скор последнего срабатывания цели — для диагностики |
 | `quality_score_max` | **Максимальный** достигнутый скор за всё время (накопительно в `localStorage`) |
 | `quality_visits_total` | **Сколько всего раз** этот браузер квалифицировался как качественный |
-| `quality_internal_nav_last` | Сколько внутренних переходов было в последней квалифицирующей сессии |
+| `quality_internal_nav_last` | Снапшот: сколько внутренних переходов было в последней квалифицирующей сессии |
+| `quality_internal_nav_max` | **Максимум** кликов по внутренним ссылкам в одной сессии за всё время — для look-alike сильнее снапшота |
 | `quality_reading_pct_last` | % прочитанного контента в последней квалифицирующей сессии |
 
 `userParams` хранит только последнее значение по ключу, поэтому в нём специально лежат **агрегаты за всё время**, а не сиюминутный снапшот. Юзер, который квалифицировался 7 раз с пиковым скором 88, — гораздо более сильный seed для look-alike, чем тот, кто квалифицировался один раз со скором 88 в данный момент.
@@ -188,6 +189,7 @@ var MAX_GOAL_COUNT_PER_DAY = 3;
 | `LAST_VISIT_AT_KEY` | `'interested_user_last_visit_at'` | Ключ `localStorage` для timestamp прошлого визита. |
 | `QUALITY_TOTAL_KEY` | `'interested_user_quality_total'` | Ключ `localStorage` для накопительного счётчика квалификаций. |
 | `QUALITY_SCORE_MAX_KEY` | `'interested_user_quality_score_max'` | Ключ `localStorage` для максимального скора за всё время. |
+| `QUALITY_INTERNAL_NAV_MAX_KEY` | `'interested_user_quality_internal_nav_max'` | Ключ `localStorage` для максимума кликов по внутренним ссылкам за визит. |
 | `INTERNAL_NAV_KEY` | `'interested_user_internal_nav'` | Ключ `localStorage` для счётчика внутренних переходов с TTL 5 мин. |
 | `INTERNAL_NAV_TTL_MS` | `300000` (5 мин) | TTL записи о предыдущей внутренней навигации. |
 | `FAST_SCROLL_PPS` | `3000` | Скорость скролла, выше которой считаем «полётом», px/сек. |

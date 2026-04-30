@@ -69,7 +69,8 @@ When the goal fires, two `ym()` calls happen back-to-back:
    - `quality_score_last` — score from this latest qualification (just for diagnostics).
    - `quality_score_max` — max score ever achieved by this browser, persisted in `interested_user_quality_score_max`.
    - `quality_visits_total` — total number of times this browser has ever qualified, persisted in `interested_user_quality_total`.
-   - `quality_internal_nav_last` — internal navigation clicks in the qualifying session (snapshot, not aggregate — but useful for filtering "deep navigators" in audience builder).
+   - `quality_internal_nav_last` — internal navigation clicks in the qualifying session (snapshot, useful for diagnostics).
+   - `quality_internal_nav_max` — **maximum** internal-nav count ever reached in any single qualifying session, persisted in `interested_user_quality_internal_nav_max`. This is the look-alike-friendly aggregate: a user who once clicked through 12 internal links is a deeper engagement signal than a user with current `internal_nav=2`.
    - `quality_reading_pct_last` — reading progress at qualification (snapshot).
 
    These aggregates are stronger features for look-alike than a snapshot would be: a user who qualified 7 times with a peak score of 88 is a much better seed than one who qualified once with a current score of 88.
@@ -102,7 +103,7 @@ The daily counter is stored as `{ date: 'YYYY-MM-DD', count: N }` under `interes
 - ES5 only (`var`, `function` expressions, no arrow functions, no `let`/`const`). The file is pasted into arbitrary sites via МТЯ and must run in the broadest possible browser baseline.
 - Comments are in Russian — match the existing language when adding new ones.
 - Keep the wrapping `<script>...</script>` tags intact (the README's install flow assumes the file can be copy-pasted directly into a Custom HTML tag in МТЯ).
-- The whole script runs inside an IIFE — never expose state on `window` unless you have a strong reason. Six localStorage keys (`interested_user_daily_counter`, `interested_user_visit_count`, `interested_user_last_visit_at`, `interested_user_quality_total`, `interested_user_quality_score_max`, `interested_user_internal_nav`) are the only persistent surface.
+- The whole script runs inside an IIFE — never expose state on `window` unless you have a strong reason. Seven localStorage keys (`interested_user_daily_counter`, `interested_user_visit_count`, `interested_user_last_visit_at`, `interested_user_quality_total`, `interested_user_quality_score_max`, `interested_user_internal_nav`, `interested_user_quality_internal_nav_max`) are the only persistent surface.
 
 ## Known limitations (documented, not bugs)
 
