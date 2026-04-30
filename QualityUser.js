@@ -435,7 +435,8 @@
     for (var i = 0; i < els.length; i++) {
       var el = els[i];
       el.setAttribute('data-qu-sid', String(i));
-      var words = (el.textContent || '').split(/\s+/).length;
+      var text = (el.textContent || '').trim();
+      var words = text ? text.split(/\s+/).length : 0;
       dwell[i] = {
         since: 0,
         total: 0,
