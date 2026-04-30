@@ -38,12 +38,11 @@ The goal fires inside `trackInterestedUser()` when **all** of these are true:
 | `visibleTime` | up to 25 | 60s |
 | `activeTime` | up to 25 | 30s |
 | `maxScrollDepth` | up to 20 | 100% |
-| `textSelected` | +10 | binary |
-| `copied` (copy event) | +15 | binary |
+| `textSelected` OR `copied` | +10 / +15 | **max, not sum** — `copied` overrides `textSelected` (copy almost always co-occurs with selection, so summing them double-counts the same act) |
 | `visitCount >= 2` | +5 | binary |
 | `visitCount >= 5` | +5 | binary |
 
-Cap is ~105 in theory, ≤100 in practice. `GOAL_SCORE_THRESHOLD = 60` is a starting guess — once you have data in Metrika, look at the `score` parameter distribution and adjust. Lowering it = more conversions, looser quality. Raising it = fewer conversions, tighter quality.
+Score is clamped to 0..100 by the function itself. `GOAL_SCORE_THRESHOLD = 60` is a starting guess — once you have data in Metrika, look at the `score` parameter distribution and adjust. Lowering it = more conversions, looser quality. Raising it = fewer conversions, tighter quality.
 
 ### Goal parameters
 
@@ -51,13 +50,20 @@ When the goal fires, two `ym()` calls happen back-to-back:
 
 1. `ym(id, 'reachGoal', target, params)` — params attached to this goal achievement, visible in Metrika's "Конверсии" report:
    - `score`, `visible_time_sec`, `active_time_sec`, `scroll_depth_pct`, `visit_count`, `text_selected`, `copied`.
-2. `ym(id, 'userParams', { quality_score, quality_visit_count })` — bound to ClientID, **available for Audience segmentation in Yandex Audiences / Direct look-alike**. This is the channel that makes the data useful for ad targeting; goal-level params alone don't reach the audience builder. Don't remove it.
+2. `ym(id, 'userParams', { quality_score_last, quality_score_max, quality_visits_total })` — bound to ClientID, **available for Audience segmentation in Yandex Audiences / Direct look-alike**. This is the channel that makes the data useful for ad targeting; goal-level params alone don't reach the audience builder. Don't remove it.
+
+   `userParams` keeps only the **last** value per key, so we deliberately store **aggregates over time** rather than the current snapshot:
+   - `quality_score_last` — score from this latest qualification (just for diagnostics).
+   - `quality_score_max` — max score ever achieved by this browser, persisted in `interested_user_quality_score_max`.
+   - `quality_visits_total` — total number of times this browser has ever qualified, persisted in `interested_user_quality_total`.
+
+   These aggregates are stronger features for look-alike than a snapshot would be: a user who qualified 7 times with a peak score of 88 is a much better seed than one who qualified once with a current score of 88.
 
 `trackInterestedUser` is polled from a 5s `setInterval` (started on first user activity) and called directly from copy / text-selection / device-motion / device-orientation handlers. Goal fires at most once per page load (`goalReachedThisSession`).
 
 ### Visit count semantics
 
-`bumpVisitCount` only increments when ≥30 minutes (`SAME_SESSION_GAP_MS`) have passed since the last script load — page refreshes don't bump the counter. `LAST_VISIT_AT_KEY` stores the timestamp.
+`bumpVisitCount` only increments when ≥30 minutes (`SAME_SESSION_GAP_MS`) have passed since the last script load — page refreshes don't bump the counter. `LAST_VISIT_AT_KEY` stores the timestamp **and is updated only in the `isFreshVisit` branch** — otherwise the 30-minute window would slide forward on every refresh and a user who refreshes every 25 minutes all day would never advance past `visitCount=1`. The current semantics: 30 minutes are measured from the start of the visit, not from the last refresh inside it. This matches Yandex Metrika's own definition of a visit (30-minute gap), so `visitCount` should align with what Metrika counts.
 
 ## Bot detection — what it actually catches
 
@@ -81,7 +87,7 @@ The daily counter is stored as `{ date: 'YYYY-MM-DD', count: N }` under `interes
 - ES5 only (`var`, `function` expressions, no arrow functions, no `let`/`const`). The file is pasted into arbitrary sites via МТЯ and must run in the broadest possible browser baseline.
 - Comments are in Russian — match the existing language when adding new ones.
 - Keep the wrapping `<script>...</script>` tags intact (the README's install flow assumes the file can be copy-pasted directly into a Custom HTML tag in МТЯ).
-- The whole script runs inside an IIFE — never expose state on `window` unless you have a strong reason. Three localStorage keys (`interested_user_daily_counter`, `interested_user_visit_count`, `interested_user_last_visit_at`) are the only persistent surface.
+- The whole script runs inside an IIFE — never expose state on `window` unless you have a strong reason. Five localStorage keys (`interested_user_daily_counter`, `interested_user_visit_count`, `interested_user_last_visit_at`, `interested_user_quality_total`, `interested_user_quality_score_max`) are the only persistent surface.
 
 ## Known limitations (documented, not bugs)
 

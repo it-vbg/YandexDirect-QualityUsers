@@ -12,7 +12,11 @@
   var DAILY_STORAGE_KEY = 'interested_user_daily_counter';
   var VISIT_COUNT_KEY = 'interested_user_visit_count';
   var LAST_VISIT_AT_KEY = 'interested_user_last_visit_at';
-  var SAME_SESSION_GAP_MS = 30 * 60 * 1000;   // < 30 мин с прошлого визита = тот же визит, не считаем
+  var QUALITY_TOTAL_KEY = 'interested_user_quality_total';
+  var QUALITY_SCORE_MAX_KEY = 'interested_user_quality_score_max';
+  // 30 минут — это и стандартный visit-gap в самой Яндекс Метрике, поэтому
+  // visitCount у нас совпадает с тем, как Метрика считает визиты.
+  var SAME_SESSION_GAP_MS = 30 * 60 * 1000;
   var MAX_GOAL_COUNT_PER_DAY = 3;
 
   // Порог скоринга (0-100) для срабатывания цели. Калибруется по распределению
@@ -93,7 +97,14 @@
 
   // Счётчик визитов в этом браузере. Инкремент только если с прошлого визита
   // прошло >= SAME_SESSION_GAP_MS — иначе это рефреш/возврат на ту же страницу,
-  // а не «вернувшийся пользователь». Используется как параметр цели.
+  // а не «вернувшийся пользователь».
+  //
+  // LAST_VISIT_AT_KEY обновляется ТОЛЬКО в ветке isFreshVisit. Если бы мы
+  // обновляли его на каждом загрузке скрипта, окно SAME_SESSION_GAP_MS
+  // сдвигалось бы вперёд при каждом рефреше — пользователь, который ходит
+  // по сайту с разрывами по 25 минут весь день, навсегда оставался бы на
+  // visitCount=1. Текущая семантика: 30 минут отсчитываются от начала визита,
+  // а не от последнего рефреша внутри визита.
   function bumpVisitCount() {
     if (!supportsLocalStorage()) return 1;
     var raw = localStorage.getItem(VISIT_COUNT_KEY);
@@ -107,11 +118,14 @@
     if (isFreshVisit) {
       n += 1;
       localStorage.setItem(VISIT_COUNT_KEY, String(n));
+      localStorage.setItem(LAST_VISIT_AT_KEY, String(now));
     } else if (n === 0) {
-      n = 1;  // первый замер, но storage пустой
+      // Первый замер при отсутствующем счётчике, но lastAt свежий —
+      // экзотика, не должна приводить к visitCount=0.
+      n = 1;
       localStorage.setItem(VISIT_COUNT_KEY, '1');
+      localStorage.setItem(LAST_VISIT_AT_KEY, String(now));
     }
-    localStorage.setItem(LAST_VISIT_AT_KEY, String(now));
     return n;
   }
   var visitCount = bumpVisitCount();
@@ -309,11 +323,17 @@
     s += Math.min(visibleSec / 60, 1) * 25;          // до 25 за 60 сек видимого
     s += Math.min(activeSec / 30, 1) * 25;           // до 25 за 30 сек активного
     s += Math.min(maxScrollDepth, 1) * 20;           // до 20 за 100% глубины
-    if (textSelected) s += 10;
-    if (copied) s += 15;                             // copy сильнее selection
+
+    // Selection и copy — два сигнала чтения, copy сильнее. Берём максимум,
+    // а не сумму: copy почти всегда сопровождается selection, и складывая
+    // их мы давали бы непропорционально большой вес одному и тому же
+    // действию.
+    if (copied) s += 15;
+    else if (textSelected) s += 10;
+
     if (visitCount >= 2) s += 5;
     if (visitCount >= 5) s += 5;
-    return s;                                         // потолок 105, на практике <= 100
+    return s > 100 ? 100 : s;                         // нормируем строго в 0..100
   }
 
   // ===== Цель =====
@@ -364,15 +384,31 @@
 
     // params как параметры цели — для отчёта «Конверсии» в Метрике.
     window.ym(METRIKA_COUNTER_ID, 'reachGoal', METRIKA_TARGET, params);
+
     // userParams привязаны к ClientID и доступны для построения сегментов
-    // в Аудиториях Яндекса (look-alike в Директе). Без этого параметры
-    // видны только в отчёте по цели, но не в сегментации аудитории.
-    if (typeof window.ym === 'function') {
-      window.ym(METRIKA_COUNTER_ID, 'userParams', {
-        quality_score: Math.round(score),
-        quality_visit_count: visitCount
-      });
+    // в Аудиториях Яндекса (look-alike в Директе). userParams — это
+    // «последнее значение» по ключу, поэтому для look-alike важнее писать
+    // АГРЕГАТЫ ЗА ВСЁ ВРЕМЯ, а не текущий снапшот: сколько всего раз юзер
+    // квалифицировался + максимальный достигнутый score. Это даёт более
+    // сильную фичу, чем сиюминутный score, который перезаписывается при
+    // следующем срабатывании.
+    var roundedScore = Math.round(score);
+    var totalQuality = 1;
+    var maxScore = roundedScore;
+    if (supportsLocalStorage()) {
+      totalQuality = (parseInt(localStorage.getItem(QUALITY_TOTAL_KEY), 10) || 0) + 1;
+      var prevMax = parseInt(localStorage.getItem(QUALITY_SCORE_MAX_KEY), 10) || 0;
+      if (roundedScore > prevMax) maxScore = roundedScore;
+      else maxScore = prevMax;
+      localStorage.setItem(QUALITY_TOTAL_KEY, String(totalQuality));
+      localStorage.setItem(QUALITY_SCORE_MAX_KEY, String(maxScore));
     }
+    window.ym(METRIKA_COUNTER_ID, 'userParams', {
+      quality_score_last: roundedScore,
+      quality_score_max: maxScore,
+      quality_visits_total: totalQuality
+    });
+
     incrementDailyCount();
     goalReachedThisSession = true;
   }
@@ -437,6 +473,18 @@
     };
   }
 
+  // Trailing-edge debounce: вызвать fn один раз после wait мс тишины.
+  // Нужен именно trailing для selectionchange: пользователь долго ведёт
+  // выделение — десятки событий в секунду; нам важно дождаться окончания
+  // выделения, а не реагировать на первое движение.
+  function debounce(fn, wait) {
+    var t = 0;
+    return function () {
+      if (t) clearTimeout(t);
+      t = setTimeout(function () { t = 0; fn(); }, wait);
+    };
+  }
+
   // ===== Регистрация listener-ов =====
   // 'load' специально НЕ включён: иначе startTime ставится в момент загрузки
   // страницы у любого посетителя (включая ботов и фоновые вкладки), и через
@@ -458,7 +506,10 @@
 
   document.addEventListener('copy', handleCopy);
 
-  document.addEventListener('selectionchange', handleTextSelection);
+  // selectionchange стреляет десятки раз в секунду при ведении выделения
+  // мышью. Дебаунсим на 250 мс, чтобы trackInterestedUser/getDailyCount/
+  // calculateScore не вызывались каждый кадр.
+  document.addEventListener('selectionchange', debounce(handleTextSelection, 250));
 
   // DeviceMotion/Orientation работают только на мобильных. На iOS 13+ они
   // требуют DeviceMotionEvent.requestPermission() из user gesture, поэтому
