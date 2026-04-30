@@ -1,284 +1,304 @@
 <script>
-// Конфигурация метрики
-var METRIKA_COUNTER_ID = 12345678; // Используем номер существующего счётчика
-var METRIKA_TARGET = 'QualityUser';
+(function () {
+  'use strict';
 
-// Период времени (в миллисекундах), в течение которого пользователь должен провести на сайте
-var MIN_TIME_ON_SITE = 30000; // Например, 30 секунд
+  // ===== Конфигурация =====
+  var METRIKA_COUNTER_ID = 12345678;          // ID счётчика Яндекс Метрики
+  var METRIKA_TARGET = 'QualityUser';         // Имя цели (должно совпадать с настройкой в Метрике)
+  var MIN_TIME_ON_SITE = 30000;               // Порог времени на сайте, мс
 
-// Переменные для отслеживания состояния
-var startTime;
-var isUserActive = false;
-var textSelected = false;
-var deviceMotionDetected = false;
-var deviceOrientationDetected = false;
+  var DAILY_STORAGE_KEY = 'interested_user_daily_counter';
+  var MAX_GOAL_COUNT_PER_DAY = 3;
 
-// Переменные для отслеживания действий пользователя
-var mouseMovements = [];
-var scrollEvents = [];
-var interactionEvents = [];
+  // ===== Состояние сессии =====
+  var startTime = 0;
+  var isUserActive = false;
+  var textSelected = false;
+  var hasScrolled = false;
+  var hasMouseMoved = false;
+  var deviceMotionDetected = false;
+  var deviceOrientationDetected = false;
+  var goalReachedThisSession = false;
 
-// Пороговые значения
-var movementThreshold = 10;
-var maxMouseMovements = 100;
-var maxScrollEvents = 50;
-var maxInteractionEvents = 200;
+  // Флаги подозрительного поведения. Заполняются единожды зарегистрированными
+  // listener-ами ниже; isBot() только читает их состояние.
+  var suspiciousMouse = false;
+  var suspiciousScroll = false;
+  var suspiciousRequests = false;
 
-// Проверка поддержки localStorage
-function supportsLocalStorage() {
-  try {
-    var test = '__storage_test__';
-    localStorage.setItem(test, test);
-    localStorage.removeItem(test);
-    return true;
-  } catch (e) {
+  // ===== localStorage =====
+  function supportsLocalStorage() {
+    try {
+      var k = '__storage_test__';
+      localStorage.setItem(k, k);
+      localStorage.removeItem(k);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function todayKey() {
+    var d = new Date();
+    var m = d.getMonth() + 1;
+    var day = d.getDate();
+    return d.getFullYear() + '-' + (m < 10 ? '0' + m : m) + '-' + (day < 10 ? '0' + day : day);
+  }
+
+  // Возвращает текущий счётчик за сегодня. Если в storage лежит запись от
+  // другого дня — считаем, что сегодня цель ещё не срабатывала.
+  function getDailyCount() {
+    if (!supportsLocalStorage()) return 0;
+    var raw = localStorage.getItem(DAILY_STORAGE_KEY);
+    if (!raw) return 0;
+    try {
+      var parsed = JSON.parse(raw);
+      if (parsed && parsed.date === todayKey() && typeof parsed.count === 'number') {
+        return parsed.count;
+      }
+    } catch (e) {
+      // Старый формат (просто число) трактуем как «не сегодня» и сбрасываем.
+    }
+    return 0;
+  }
+
+  function incrementDailyCount() {
+    if (!supportsLocalStorage()) return;
+    var next = getDailyCount() + 1;
+    localStorage.setItem(DAILY_STORAGE_KEY, JSON.stringify({ date: todayKey(), count: next }));
+  }
+
+  function isWithinDailyLimit() {
+    return getDailyCount() < MAX_GOAL_COUNT_PER_DAY;
+  }
+
+  // ===== Детекция ботов =====
+  var BOT_UA_PATTERNS = [
+    /bot/, /crawl/, /spider/, /slurp/, /yahoo/, /mediapartners/, /adsbot/,
+    /bingbot/, /googlebot/, /baiduspider/, /yandexbot/, /sogou/, /exabot/,
+    /facebot/, /ia_archiver/
+  ];
+
+  function matchesBotUserAgent() {
+    var ua = (navigator.userAgent || '').toLowerCase();
+    for (var i = 0; i < BOT_UA_PATTERNS.length; i++) {
+      if (BOT_UA_PATTERNS[i].test(ua)) return true;
+    }
     return false;
   }
-}
 
-// Функция для отслеживания заинтересованного пользователя
-function trackInterestedUser() {
-  var currentTime = new Date().getTime();
-  var timeOnSite = currentTime - startTime;
-
-  if (isUserActive && (timeOnSite >= MIN_TIME_ON_SITE || textSelected || deviceMotionDetected || deviceOrientationDetected) && !isBot() && isWithinDailyLimit()) {
-    ym(METRIKA_COUNTER_ID, 'reachGoal', METRIKA_TARGET);
-    incrementDailyCounter();
+  function isHeadless() {
+    // navigator.webdriver === true сам по себе уже сигнал автоматизации
+    // (CDP/Selenium/Playwright выставляют его). !window.chrome добавлять нельзя:
+    // в Firefox/Safari window.chrome не существует и проверка даёт false-positive.
+    return /HeadlessChrome/.test(navigator.userAgent || '');
   }
-}
 
-// Функция для определения бота
-function isBot() {
-  var userAgent = navigator.userAgent.toLowerCase();
-  var botPatterns = [/bot/, /crawl/, /spider/, /slurp/, /yahoo/, /mediapartners/, /adsbot/, /bingbot/, /googlebot/, /baiduspider/, /yandexbot/, /sogou/, /exabot/, /facebot/, /ia_archiver/];
-  var isBot = botPatterns.some(function(pattern) {
-    return pattern.test(userAgent);
-  });
+  function isHiddenViewport() {
+    // Применяется только к top-level окну: офскрин-iframe и preview-рендеры
+    // у партнёров — легитимный сценарий, их трогать не надо. window.top !==
+    // window сам по себе не означает бота, поэтому в этом случае возвращаем
+    // false и оставляем вердикт другим проверкам.
+    if (window.top !== window) return false;
+    return window.innerWidth === 0 && window.innerHeight === 0;
+  }
 
-  // Дополнительная проверка на основе поведения
-  var suspiciousBehaviors = [
-    function() { return window.innerWidth === 0 && window.innerHeight === 0; }, // Скрытый iframe
-    function() { return navigator.webdriver; }, // Headless браузер
-    function() { return isHeadless(); }, // Дополнительная проверка на headless
-    function() { return isUsingProxy(); }, // Проверка на использование прокси
-    function() { return hasSuspiciousBehavior(); } // Проверка на подозрительное поведение
-  ];
+  function isBot() {
+    // navigator.webdriver выделено отдельным флагом — это самый надёжный
+    // программный сигнал автоматизации, доступный без эвристик.
+    return matchesBotUserAgent()
+      || isHiddenViewport()
+      || navigator.webdriver === true
+      || isHeadless()
+      || suspiciousMouse
+      || suspiciousScroll
+      || suspiciousRequests;
+  }
 
-  var isSuspiciousBehavior = suspiciousBehaviors.some(function(check) {
-    return check();
-  });
+  // Анализ дисперсии перемещений мыши: слишком «ровные» дельты при близких
+  // к нулю средних — признак бота (программный курсор без человеческого
+  // дрожания). Требуем И малую дисперсию, И малое среднее: «ровно и почти
+  // не двигается». Иначе ровный медленный скролл-через-мышь у живого юзера
+  // тоже попадал бы под подозрение.
+  function watchMouseVariance() {
+    var lastX, lastY;
+    var history = [];
+    var maxLen = 20;
 
-  return isBot || isSuspiciousBehavior;
-}
+    window.addEventListener('mousemove', function (event) {
+      hasMouseMoved = true;
+      if (lastX !== undefined && lastY !== undefined) {
+        history.push({
+          dx: Math.abs(event.clientX - lastX),
+          dy: Math.abs(event.clientY - lastY)
+        });
+        if (history.length > maxLen) history.shift();
 
-// Функция для проверки headless браузеров
-function isHeadless() {
-  return /HeadlessChrome/.test(window.navigator.userAgent) || /Googlebot/.test(window.navigator.userAgent) || (navigator.webdriver && !window.chrome);
-}
+        if (history.length === maxLen) {
+          var sumX = 0, sumY = 0;
+          for (var i = 0; i < maxLen; i++) { sumX += history[i].dx; sumY += history[i].dy; }
+          var avgX = sumX / maxLen;
+          var avgY = sumY / maxLen;
 
-// Функция для определения использования прокси
-function isUsingProxy() {
-  // Данный метод можно оставить, но стоит учитывать его ограниченную эффективность
-  var proxyHeaders = [
-    'HTTP_X_FORWARDED_FOR', 
-    'HTTP_X_FORWARDED', 
-    'HTTP_FORWARDED_FOR', 
-    'HTTP_CLIENT_IP', 
-    'HTTP_VIA', 
-    'HTTP_PROXY_CONNECTION',
-    'HTTP_X_REAL_IP' // Добавлен дополнительный заголовок
-  ];
+          var varX = 0, varY = 0;
+          for (var j = 0; j < maxLen; j++) {
+            varX += Math.pow(history[j].dx - avgX, 2);
+            varY += Math.pow(history[j].dy - avgY, 2);
+          }
+          varX /= maxLen;
+          varY /= maxLen;
 
-  return proxyHeaders.some(function(header) {
-    return window.navigator[header] !== undefined;
-  });
-}
-
-// Функция для проверки подозрительного поведения
-function hasSuspiciousBehavior() {
-  return hasSuspiciousMouseMovements() || hasSuspiciousScrollBehavior() || hasSuspiciousRequestFrequency();
-}
-
-// Функция для проверки подозрительных движений мыши
-function hasSuspiciousMouseMovements() {
-  var suspicious = false;
-  var lastX, lastY;
-  var movementHistory = [];
-  var maxHistoryLength = 20;
-
-  window.addEventListener('mousemove', function(event) {
-    if (lastX !== undefined && lastY !== undefined) {
-      var deltaX = Math.abs(event.clientX - lastX);
-      var deltaY = Math.abs(event.clientY - lastY);
-
-      movementHistory.push({ deltaX: deltaX, deltaY: deltaY });
-
-      if (movementHistory.length > maxHistoryLength) {
-        movementHistory.shift();
-      }
-
-      if (movementHistory.length === maxHistoryLength) {
-        var totalDeltaX = movementHistory.reduce(function(sum, move) { return sum + move.deltaX; }, 0);
-        var totalDeltaY = movementHistory.reduce(function(sum, move) { return sum + move.deltaY; }, 0);
-        var averageDeltaX = totalDeltaX / movementHistory.length;
-        var averageDeltaY = totalDeltaY / movementHistory.length;
-
-        var varianceX = movementHistory.reduce(function(sum, move) { return sum + Math.pow(move.deltaX - averageDeltaX, 2); }, 0) / movementHistory.length;
-        var varianceY = movementHistory.reduce(function(sum, move) { return sum + Math.pow(move.deltaY - averageDeltaY, 2); }, 0) / movementHistory.length;
-
-        if (varianceX < 1 && varianceY < 1) {
-          suspicious = true;
+          if (varX < 1 && varY < 1 && avgX < 1 && avgY < 1) suspiciousMouse = true;
         }
       }
-    }
-    lastX = event.clientX;
-    lastY = event.clientY;
-  });
+      lastX = event.clientX;
+      lastY = event.clientY;
+    }, { passive: true });
+  }
 
-  return suspicious;
-}
+  // Аналогично для прокрутки. У человека длинное чтение даёт ровные тики
+  // колеса/трекпада с близкими дельтами — поэтому только малой дисперсии
+  // мало, требуем И малое среднее (бот «дёргает» страницу мелкими шагами).
+  function watchScrollVariance() {
+    var lastY;
+    var history = [];
+    var maxLen = 20;
 
-// Функция для проверки подозрительного поведения прокрутки
-function hasSuspiciousScrollBehavior() {
-  var suspicious = false;
-  var lastScrollY;
-  var scrollHistory = [];
-  var maxHistoryLength = 20;
+    window.addEventListener('scroll', function () {
+      hasScrolled = true;
+      var y = window.scrollY || window.pageYOffset;
+      if (lastY !== undefined) {
+        history.push(Math.abs(y - lastY));
+        if (history.length > maxLen) history.shift();
 
-  window.addEventListener('scroll', function() {
-    var currentScrollY = window.scrollY || window.pageYOffset;
+        if (history.length === maxLen) {
+          var sum = 0;
+          for (var i = 0; i < maxLen; i++) sum += history[i];
+          var avg = sum / maxLen;
 
-    if (lastScrollY !== undefined) {
-      var deltaY = Math.abs(currentScrollY - lastScrollY);
+          var v = 0;
+          for (var j = 0; j < maxLen; j++) v += Math.pow(history[j] - avg, 2);
+          v /= maxLen;
 
-      scrollHistory.push(deltaY);
-
-      if (scrollHistory.length > maxHistoryLength) {
-        scrollHistory.shift();
-      }
-
-      if (scrollHistory.length === maxHistoryLength) {
-        var totalDeltaY = scrollHistory.reduce(function(sum, deltaY) { return sum + deltaY; }, 0);
-        var averageDeltaY = totalDeltaY / scrollHistory.length;
-
-        var varianceY = scrollHistory.reduce(function(sum, deltaY) { return sum + Math.pow(deltaY - averageDeltaY, 2); }, 0) / scrollHistory.length;
-
-        if (varianceY < 1) {
-          suspicious = true;
+          if (v < 1 && avg < 2) suspiciousScroll = true;
         }
       }
+      lastY = y;
+    }, { passive: true });
+  }
+
+  // Аномально высокая частота дискретных пользовательских событий за минуту.
+  // Сюда НЕ включаем mousemove: один реальный взмах мышью даёт 30–50 событий
+  // за доли секунды, любой живой юзер мгновенно превысил бы лимит. Mousemove
+  // анализируется отдельно через дисперсию в watchMouseVariance().
+  function watchRequestFrequency() {
+    var stamps = [];
+    var limit = 600;     // 10 событий/сек устойчиво — это уже не человек
+    var window_ms = 60000;
+
+    function tick() {
+      var now = Date.now();
+      stamps.push(now);
+      var cutoff = now - window_ms;
+      while (stamps.length && stamps[0] < cutoff) stamps.shift();
+      if (stamps.length > limit) suspiciousRequests = true;
     }
-    lastScrollY = currentScrollY;
-  });
 
-  return suspicious;
-}
-
-// Функция для проверки подозрительной частоты запросов
-function hasSuspiciousRequestFrequency() {
-  var requests = [];
-  var requestLimit = 10; // Лимит запросов в минуту
-  var timeLimit = 60000; // Временной лимит в миллисекундах
-
-  function logRequest() {
-    var now = Date.now();
-    requests.push(now);
-    requests = requests.filter(function(timestamp) {
-      return now - timestamp < timeLimit;
-    });
-    return requests.length > requestLimit;
+    window.addEventListener('scroll', tick, { passive: true });
+    window.addEventListener('keydown', tick);
+    window.addEventListener('touchstart', tick, { passive: true });
   }
 
-  window.addEventListener('load', logRequest);
-  window.addEventListener('mousemove', logRequest);
-  window.addEventListener('scroll', logRequest);
-  window.addEventListener('keydown', logRequest);
-  window.addEventListener('touchstart', logRequest);
+  // ===== Цель =====
+  // goalReachedThisSession — сессионный (in-memory) флаг: при перезагрузке
+  // вкладки сбрасывается, при SPA-навигации сохраняется. Жёсткий cap — это
+  // дневной счётчик в localStorage.
+  function trackInterestedUser() {
+    if (goalReachedThisSession) return;
+    if (!isUserActive) return;
 
-  return logRequest();
-}
+    var timeOnSite = Date.now() - startTime;
 
-// Хранилище для счетчика срабатываний цели в день
-var dailyCounterStorageKey = 'interested_user_daily_counter';
-var maxGoalCountPerDay = 3;
+    // Семантика «качественного пользователя»: время на сайте — обязательный
+    // минимальный фильтр, плюс хотя бы один признак реальной активности
+    // (скролл, движение мыши, выделение текста, вращение/движение устройства).
+    // Открыл и забыл вкладку без скролла — не цель.
+    var liveSignal = hasScrolled
+      || hasMouseMoved
+      || textSelected
+      || deviceMotionDetected
+      || deviceOrientationDetected;
+    var engaged = timeOnSite >= MIN_TIME_ON_SITE && liveSignal;
 
-// Функция для проверки, не превышено ли ограничение срабатывания цели в день
-function isWithinDailyLimit() {
-  var dailyCounter = getDailyCounterFromStorage() || 0;
-  return dailyCounter < maxGoalCountPerDay;
-}
+    if (!engaged) return;
+    if (isBot()) return;
+    if (!isWithinDailyLimit()) return;
+    if (typeof window.ym !== 'function') return;
 
-// Функция для увеличения счетчика срабатываний цели в день
-function incrementDailyCounter() {
-  var dailyCounter = getDailyCounterFromStorage() || 0;
-  dailyCounter++;
-  setDailyCounterToStorage(dailyCounter);
-}
-
-// Функция для получения счетчика срабатываний цели в день из хранилища
-function getDailyCounterFromStorage() {
-  if (supportsLocalStorage()) {
-    return parseInt(localStorage.getItem(dailyCounterStorageKey));
+    window.ym(METRIKA_COUNTER_ID, 'reachGoal', METRIKA_TARGET);
+    incrementDailyCount();
+    goalReachedThisSession = true;
   }
-  return null;
-}
 
-// Функция для сохранения счетчика срабатываний цели в день в хранилище
-function setDailyCounterToStorage(value) {
-  if (supportsLocalStorage()) {
-    localStorage.setItem(dailyCounterStorageKey, value);
-  }
-}
-
-// Обработчик события, который вызывается при активности пользователя на сайте
-function handleUserActivity() {
-  if (!isUserActive) {
+  // ===== Обработчики активности =====
+  function handleUserActivity() {
+    if (isUserActive) return;
     isUserActive = true;
-    startTime = new Date().getTime();
+    startTime = Date.now();
     setTimeout(trackInterestedUser, MIN_TIME_ON_SITE);
   }
-}
 
-// Обработчик события, который вызывается при выделении текста
-function handleTextSelection() {
-  if (window.getSelection().toString().length > 0) {
-    textSelected = true;
+  function handleTextSelection() {
+    var sel = window.getSelection && window.getSelection();
+    if (sel && sel.toString().length > 0) {
+      textSelected = true;
+      trackInterestedUser();
+    }
+  }
+
+  function handleDeviceMotion() {
+    deviceMotionDetected = true;
     trackInterestedUser();
   }
-}
 
-// Функция троттлинга
-function throttle(fn, wait) {
-  var time = Date.now();
-  return function() {
-    if ((time + wait - Date.now()) < 0) {
-      fn();
-      time = Date.now();
-    }
-  };
-}
+  function handleDeviceOrientation() {
+    deviceOrientationDetected = true;
+    trackInterestedUser();
+  }
 
-// Обработчик события для devicemotion
-function handleDeviceMotion(event) {
-  deviceMotionDetected = true;
-  trackInterestedUser();
-}
+  function throttle(fn, wait) {
+    var last = 0;
+    return function () {
+      var now = Date.now();
+      if (now - last > wait) {
+        last = now;
+        fn();
+      }
+    };
+  }
 
-// Обработчик события для deviceorientation
-function handleDeviceOrientation(event) {
-  deviceOrientationDetected = true;
-  trackInterestedUser();
-}
+  // ===== Регистрация listener-ов =====
+  // 'load' специально НЕ включён: иначе startTime ставится в момент загрузки
+  // страницы у любого посетителя (включая ботов и фоновые вкладки), и через
+  // MIN_TIME_ON_SITE цель отправляется без единого человеческого ввода.
+  // Таймер стартует только от реальной интеракции.
+  var activityEvents = ['mousemove', 'keydown', 'scroll', 'touchstart'];
+  for (var i = 0; i < activityEvents.length; i++) {
+    window.addEventListener(activityEvents[i], handleUserActivity, { once: true, passive: true });
+  }
 
-// Добавляем обработчики событий для отслеживания активности пользователя
-['load', 'mousemove', 'keydown', 'scroll', 'touchstart'].forEach(function(eventType) {
-  window.addEventListener(eventType, handleUserActivity, { once: true });
-});
+  document.addEventListener('selectionchange', handleTextSelection);
 
-// Добавляем обработчик события для выделения текста
-document.addEventListener('selectionchange', handleTextSelection);
+  // DeviceMotion/Orientation работают только на мобильных. На iOS 13+ они
+  // требуют DeviceMotionEvent.requestPermission() из user gesture, поэтому
+  // без явного UI-разрешения флаги не сработают. На десктопах событий нет
+  // вовсе. Это вспомогательный сигнал — основной канал срабатывания цели —
+  // время на сайте + выделение текста.
+  window.addEventListener('devicemotion', throttle(handleDeviceMotion, 1000));
+  window.addEventListener('deviceorientation', throttle(handleDeviceOrientation, 1000));
 
-// Добавляем обработчики событий для devicemotion и deviceorientation с троттлингом
-window.addEventListener('devicemotion', throttle(handleDeviceMotion, 1000));
-window.addEventListener('deviceorientation', throttle(handleDeviceOrientation, 1000));
+  watchMouseVariance();
+  watchScrollVariance();
+  watchRequestFrequency();
+})();
 </script>
