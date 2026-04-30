@@ -5,9 +5,9 @@
   // ===== Конфигурация =====
   var METRIKA_COUNTER_ID = 12345678;          // ID счётчика Яндекс Метрики
   var METRIKA_TARGET = 'QualityUser';         // Имя цели (должно совпадать с настройкой в Метрике)
-  var MIN_TIME_ON_SITE = 30000;               // Минимальное ВИДИМОЕ время на сайте, мс
-  var MIN_ACTIVE_TIME = 15000;                // Минимальное АКТИВНОЕ время (без idle), мс
-  var IDLE_THRESHOLD = 30000;                 // После сколько мс простоя счётчик активности встаёт на паузу
+  var MIN_TIME_ON_SITE = 25000;               // Минимальное ВИДИМОЕ время на сайте, мс
+  var MIN_ACTIVE_TIME = 12000;                // Минимальное АКТИВНОЕ время (без idle), мс
+  var IDLE_THRESHOLD = 20000;                 // После сколько мс простоя счётчик активности встаёт на паузу
 
   var DAILY_STORAGE_KEY = 'interested_user_daily_counter';
   var VISIT_COUNT_KEY = 'interested_user_visit_count';
@@ -20,11 +20,11 @@
   // 30 минут — это и стандартный visit-gap в самой Яндекс Метрике, поэтому
   // visitCount у нас совпадает с тем, как Метрика считает визиты.
   var SAME_SESSION_GAP_MS = 30 * 60 * 1000;
-  var MAX_GOAL_COUNT_PER_DAY = 3;
+  var MAX_GOAL_COUNT_PER_DAY = 5;
 
   // Порог скоринга (0-100) для срабатывания цели. Калибруется по распределению
   // параметра score в Метрике под конкретный сайт.
-  var GOAL_SCORE_THRESHOLD = 60;
+  var GOAL_SCORE_THRESHOLD = 45;
 
   // ===== Состояние сессии =====
   var isUserActive = false;
