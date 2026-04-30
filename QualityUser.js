@@ -11,7 +11,13 @@
 
   var DAILY_STORAGE_KEY = 'interested_user_daily_counter';
   var VISIT_COUNT_KEY = 'interested_user_visit_count';
+  var LAST_VISIT_AT_KEY = 'interested_user_last_visit_at';
+  var SAME_SESSION_GAP_MS = 30 * 60 * 1000;   // < 30 мин с прошлого визита = тот же визит, не считаем
   var MAX_GOAL_COUNT_PER_DAY = 3;
+
+  // Порог скоринга (0-100) для срабатывания цели. Калибруется по распределению
+  // параметра score в Метрике под конкретный сайт.
+  var GOAL_SCORE_THRESHOLD = 60;
 
   // ===== Состояние сессии =====
   var isUserActive = false;
@@ -22,6 +28,7 @@
   var deviceOrientationDetected = false;
   var goalReachedThisSession = false;
   var maxScrollDepth = 0;             // Доля прокрученного документа от 0 до 1
+  var copied = false;                 // Был ли copy-event (сильный сигнал чтения)
 
   // Счётчик видимого времени: тикает только пока вкладка в foreground.
   var visibleTimeAccumulated = 0;
@@ -84,17 +91,27 @@
     return getDailyCount() < MAX_GOAL_COUNT_PER_DAY;
   }
 
-  // Счётчик визитов в этом браузере. Инкрементируется один раз при загрузке
-  // скрипта и используется как параметр цели — вернувшийся пользователь это
-  // более тёплый сигнал. SPA-навигация не считается за новый визит, потому
-  // что скрипт перевыполняется только при reload/новой странице.
+  // Счётчик визитов в этом браузере. Инкремент только если с прошлого визита
+  // прошло >= SAME_SESSION_GAP_MS — иначе это рефреш/возврат на ту же страницу,
+  // а не «вернувшийся пользователь». Используется как параметр цели.
   function bumpVisitCount() {
     if (!supportsLocalStorage()) return 1;
     var raw = localStorage.getItem(VISIT_COUNT_KEY);
     var n = parseInt(raw, 10);
     if (!(n >= 0)) n = 0;
-    n += 1;
-    localStorage.setItem(VISIT_COUNT_KEY, String(n));
+
+    var lastAt = parseInt(localStorage.getItem(LAST_VISIT_AT_KEY), 10);
+    var now = Date.now();
+    var isFreshVisit = !(lastAt > 0) || (now - lastAt >= SAME_SESSION_GAP_MS);
+
+    if (isFreshVisit) {
+      n += 1;
+      localStorage.setItem(VISIT_COUNT_KEY, String(n));
+    } else if (n === 0) {
+      n = 1;  // первый замер, но storage пустой
+      localStorage.setItem(VISIT_COUNT_KEY, '1');
+    }
+    localStorage.setItem(LAST_VISIT_AT_KEY, String(now));
     return n;
   }
   var visitCount = bumpVisitCount();
@@ -113,18 +130,20 @@
     }
   });
 
-  // Тик активного времени: раз в секунду, только если вкладка видима и
-  // активность была недавно. Это даёт честную метрику внимания, а не просто
-  // «вкладка открыта».
-  setInterval(function () {
-    if (document.visibilityState !== 'visible') return;
-    if (Date.now() - lastActivityAt < IDLE_THRESHOLD) {
-      activeTime += 1000;
-    }
-  }, 1000);
-
   function bumpActivity() {
     lastActivityAt = Date.now();
+  }
+
+  // Тик активного времени запускается только после первой реальной интеракции
+  // (см. handleUserActivity). Бот, открывший страницу и ничего не делающий,
+  // таймер не крутит.
+  function startActiveTimeTicker() {
+    setInterval(function () {
+      if (document.visibilityState !== 'visible') return;
+      if (Date.now() - lastActivityAt < IDLE_THRESHOLD) {
+        activeTime += 1000;
+      }
+    }, 1000);
   }
 
   // ===== Детекция ботов =====
@@ -182,7 +201,6 @@
 
     window.addEventListener('mousemove', function (event) {
       hasMouseMoved = true;
-      bumpActivity();
       if (lastX !== undefined && lastY !== undefined) {
         history.push({
           dx: Math.abs(event.clientX - lastX),
@@ -222,7 +240,6 @@
 
     window.addEventListener('scroll', function () {
       hasScrolled = true;
-      bumpActivity();
 
       // Глубина прочтения: максимум за сессию, в долях документа.
       var doc = document.documentElement || document.body;
@@ -276,16 +293,39 @@
     window.addEventListener('touchstart', tick, { passive: true });
   }
 
+  // ===== Скоринг =====
+  // Каждый сигнал даёт нормированный вклад 0..max. Слабые сигналы могут
+  // компенсироваться сильными (долгое чтение без скролла, или короткий визит
+  // с copy-event и максимальной глубиной — обе ситуации зачитываются).
+  //
+  // Веса откалиброваны под общий потолок 100 при насыщении большинства
+  // сигналов. Реальные пороги под конкретный сайт подбираются по
+  // распределению параметра score в Метрике.
+  function calculateScore() {
+    var s = 0;
+    var visibleSec = getVisibleTime() / 1000;
+    var activeSec = activeTime / 1000;
+
+    s += Math.min(visibleSec / 60, 1) * 25;          // до 25 за 60 сек видимого
+    s += Math.min(activeSec / 30, 1) * 25;           // до 25 за 30 сек активного
+    s += Math.min(maxScrollDepth, 1) * 20;           // до 20 за 100% глубины
+    if (textSelected) s += 10;
+    if (copied) s += 15;                             // copy сильнее selection
+    if (visitCount >= 2) s += 5;
+    if (visitCount >= 5) s += 5;
+    return s;                                         // потолок 105, на практике <= 100
+  }
+
   // ===== Цель =====
   // goalReachedThisSession — сессионный (in-memory) флаг: при перезагрузке
   // вкладки сбрасывается, при SPA-навигации сохраняется. Жёсткий cap — это
   // дневной счётчик в localStorage.
   //
   // Семантика «качественного пользователя»:
-  //  1) видимое время на сайте >= MIN_TIME_ON_SITE (фоновые вкладки не идут в зачёт),
-  //  2) активное время >= MIN_ACTIVE_TIME (idle-периоды не идут в зачёт),
-  //  3) хотя бы один признак реальной активности (живой сигнал).
-  // Все три условия — AND.
+  //  - score >= GOAL_SCORE_THRESHOLD (взвешенная сумма сигналов),
+  //  - И минимальный гейт: пользователь реально присутствовал на странице,
+  //    чтобы score=10 от visitCount=5+ один не пробивал порог в отрыве от
+  //    текущей сессии.
   function trackInterestedUser() {
     if (goalReachedThisSession) return;
     if (!isUserActive) return;
@@ -294,28 +334,45 @@
     var liveSignal = hasScrolled
       || hasMouseMoved
       || textSelected
+      || copied
       || deviceMotionDetected
       || deviceOrientationDetected;
-    var engaged = visibleMs >= MIN_TIME_ON_SITE
-      && activeTime >= MIN_ACTIVE_TIME
-      && liveSignal;
 
-    if (!engaged) return;
+    // Минимальный гейт: половина исторических порогов плюс хоть один сигнал.
+    // Без него «горячий» visitCount или длинный idle на открытой вкладке мог
+    // бы натянуть score на ровном месте.
+    var minGate = visibleMs >= MIN_TIME_ON_SITE / 2
+      && activeTime >= MIN_ACTIVE_TIME / 2
+      && liveSignal;
+    if (!minGate) return;
+
+    var score = calculateScore();
+    if (score < GOAL_SCORE_THRESHOLD) return;
     if (isBot()) return;
     if (!isWithinDailyLimit()) return;
     if (typeof window.ym !== 'function') return;
 
-    // Параметры цели — для сегментации в Метрике и обучения автостратегий
-    // Директа на распределении, а не на бинарном «сработала/нет».
     var params = {
+      score: Math.round(score),
       visible_time_sec: Math.round(visibleMs / 1000),
       active_time_sec: Math.round(activeTime / 1000),
       scroll_depth_pct: Math.round(maxScrollDepth * 100),
       visit_count: visitCount,
-      text_selected: textSelected ? 1 : 0
+      text_selected: textSelected ? 1 : 0,
+      copied: copied ? 1 : 0
     };
 
+    // params как параметры цели — для отчёта «Конверсии» в Метрике.
     window.ym(METRIKA_COUNTER_ID, 'reachGoal', METRIKA_TARGET, params);
+    // userParams привязаны к ClientID и доступны для построения сегментов
+    // в Аудиториях Яндекса (look-alike в Директе). Без этого параметры
+    // видны только в отчёте по цели, но не в сегментации аудитории.
+    if (typeof window.ym === 'function') {
+      window.ym(METRIKA_COUNTER_ID, 'userParams', {
+        quality_score: Math.round(score),
+        quality_visit_count: visitCount
+      });
+    }
     incrementDailyCount();
     goalReachedThisSession = true;
   }
@@ -325,10 +382,14 @@
     bumpActivity();
     if (isUserActive) return;
     isUserActive = true;
+    startActiveTimeTicker();
     // Периодически проверяем условия цели. Один setTimeout под фиксированный
     // порог не годится: visibleTime и activeTime растут не линейно от часов
     // на стене (фоновые вкладки/idle их останавливают), поэтому опрашиваем
     // условие каждые 5 секунд, пока цель не сработает или сессия не закончится.
+    // Интервал не самоостанавливается, если цель так и не сработает — это
+    // by design: «копеечная» нагрузка, плюс пользователь может квалифицироваться
+    // позже за счёт активности после паузы.
     var iv = setInterval(function () {
       if (goalReachedThisSession) {
         clearInterval(iv);
@@ -336,6 +397,12 @@
       }
       trackInterestedUser();
     }, 5000);
+  }
+
+  function handleCopy() {
+    copied = true;
+    bumpActivity();
+    trackInterestedUser();
   }
 
   function handleTextSelection() {
@@ -379,11 +446,17 @@
   for (var i = 0; i < activityEvents.length; i++) {
     window.addEventListener(activityEvents[i], handleUserActivity, { once: true, passive: true });
   }
-  // Дополнительный listener на тех же событиях — без { once: true }, чтобы
-  // постоянно обновлять lastActivityAt для счётчика активного времени.
+  // Постоянные listener-ы для обновления lastActivityAt — одно место правды
+  // для всех источников активности. Дублирование bumpActivity внутри
+  // watchMouseVariance/watchScrollVariance специально убрано: если кто-то
+  // отрефакторит watch-функции, lastActivityAt не должен сломаться.
+  window.addEventListener('mousemove', bumpActivity, { passive: true });
+  window.addEventListener('scroll', bumpActivity, { passive: true });
   window.addEventListener('keydown', bumpActivity);
   window.addEventListener('touchstart', bumpActivity, { passive: true });
   window.addEventListener('click', bumpActivity, { passive: true });
+
+  document.addEventListener('copy', handleCopy);
 
   document.addEventListener('selectionchange', handleTextSelection);
 
