@@ -730,7 +730,8 @@
   // Внутренняя навигация: клик по <a[href]> с тем же origin. Считаем только
   // настоящие переходы (не якорные #fragment — они не покидают страницу).
   document.addEventListener('click', function (e) {
-    var a = e.target && e.target.closest && e.target.closest('a[href]');
+    var t = e.target;
+    var a = (t && t.nodeType === 1) ? t.closest('a[href]') : null;
     if (!a || !a.host) return;
     if (a.host !== location.host) return;            // внешняя ссылка
     if (a.hash && a.pathname === location.pathname) return;  // якорь на той же странице
