@@ -404,23 +404,31 @@
   // чтения. На длинном абзаце 50 слов — 10 сек.
   //
   // Если контентных секций < READING_MIN_SECTIONS — fallback на старую
-  // глобальную глубину (см. readingScore()).
+  // глобальную глубину (см. readingProgress()). На SPA, где контент
+  // подгружается после DOMContentLoaded, дополнительно ждём через
+  // MutationObserver (см. ensureReadingTracker).
+  var READING_SECTION_SELECTOR =
+    'main p, main h2, main h3, main li, ' +
+    'article p, article h2, article h3, article li, ' +
+    '[role="main"] p, [role="main"] h2, [role="main"] h3, [role="main"] li';
+  var readingTrackerInitialized = false;
+
   function setupReadingTracker() {
+    if (readingTrackerInitialized) return;
     if (typeof window.IntersectionObserver !== 'function') return;
 
-    var selector = 'main p, main h2, main h3, main li, ' +
-                   'article p, article h2, article h3, article li, ' +
-                   '[role="main"] p, [role="main"] h2, [role="main"] h3, [role="main"] li';
     var els;
     try {
-      els = document.querySelectorAll(selector);
+      els = document.querySelectorAll(READING_SECTION_SELECTOR);
     } catch (e) { return; }
 
-    totalSections = els.length;
-    if (totalSections < READING_MIN_SECTIONS) {
-      totalSections = 0;  // явно сигналим fallback в readingScore()
+    if (els.length < READING_MIN_SECTIONS) {
+      totalSections = 0;  // явно сигналим fallback в readingProgress()
       return;
     }
+
+    readingTrackerInitialized = true;
+    totalSections = els.length;
 
     var dwell = {};       // id → { since, total, counted, threshold }
     for (var i = 0; i < els.length; i++) {
@@ -457,6 +465,30 @@
     }, { threshold: 0.5 });
 
     for (var j = 0; j < els.length; j++) io.observe(els[j]);
+  }
+
+  // На SPA-сайтах контент рендерится после DOMContentLoaded (Next.js, Nuxt,
+  // Vue с гидрацией). Если первая попытка setupReadingTracker не нашла
+  // достаточно секций — наблюдаем за DOM и пробуем ещё раз, когда контент
+  // появится. Стоп через READING_OBSERVE_TIMEOUT_MS — иначе на сайтах вовсе
+  // без размеченного <main> наблюдатель тикал бы на каждое DOM-изменение
+  // до закрытия вкладки.
+  var READING_OBSERVE_TIMEOUT_MS = 30000;
+  function ensureReadingTracker() {
+    setupReadingTracker();
+    if (readingTrackerInitialized) return;
+    if (typeof window.MutationObserver !== 'function') return;
+    if (!document.body) return;
+
+    var mo = new MutationObserver(function () {
+      var els = document.querySelectorAll(READING_SECTION_SELECTOR);
+      if (els.length >= READING_MIN_SECTIONS) {
+        mo.disconnect();
+        setupReadingTracker();
+      }
+    });
+    mo.observe(document.body, { childList: true, subtree: true });
+    setTimeout(function () { mo.disconnect(); }, READING_OBSERVE_TIMEOUT_MS);
   }
 
   // Доля прочитанных секций / fallback на глобальную глубину.
@@ -735,12 +767,13 @@
   watchRequestFrequency();
 
   // Reading tracker зависит от DOM с контентом. Если скрипт выполняется до
-  // парсинга <body>, querySelectorAll вернёт 0 элементов и мы зря провалимся
-  // в fallback. Запускаем после DOMContentLoaded или сразу, если уже готов.
+  // парсинга <body>, querySelectorAll вернёт 0 элементов. Запускаем после
+  // DOMContentLoaded или сразу, если уже готов. ensureReadingTracker
+  // дополнительно ждёт SPA-гидрации через MutationObserver.
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', setupReadingTracker);
+    document.addEventListener('DOMContentLoaded', ensureReadingTracker);
   } else {
-    setupReadingTracker();
+    ensureReadingTracker();
   }
 })();
 </script>

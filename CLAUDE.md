@@ -51,7 +51,7 @@ Score is clamped to 0..100 by the function itself.
 
 `setupReadingTracker()` queries `main p, main h2, main h3, main li, article ..., [role="main"] ...` — deliberately scoped to content zones to avoid counting nav/footer/sidebar `<li>` as "read sections". If `>= READING_MIN_SECTIONS` (5) elements are found, an `IntersectionObserver` tracks dwell time per section. A section is "read" when accumulated dwell ≥ adaptive threshold = `max(800ms, words * 200ms)` — short paragraphs (1–2 lines) qualify in <1s, long paragraphs need proportionally more time. **If the content scope yields fewer than 5 sections, we fall back to `maxScrollDepth` so landings still get a scroll signal.**
 
-Tracker is started on `DOMContentLoaded` (or immediately if document is already parsed) — running `querySelectorAll` on a not-yet-parsed body returns 0 elements and falsely triggers fallback.
+Tracker is started by `ensureReadingTracker()` on `DOMContentLoaded` (or immediately if document is already parsed). For SPA frameworks (Next.js, Nuxt, hydrated Vue) where content renders after `DOMContentLoaded`, a `MutationObserver` watches `document.body` and re-attempts initialization when the section count crosses `READING_MIN_SECTIONS`. The observer auto-disconnects either on success or after `READING_OBSERVE_TIMEOUT_MS` (30s) — without the timeout, sites that never have a structured `<main>` would keep firing the observer on every DOM mutation until the tab closes. `setupReadingTracker` is idempotent (`readingTrackerInitialized` guard) so re-entry is safe.
 
 ### Internal navigation persistence
 
