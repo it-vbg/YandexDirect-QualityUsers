@@ -54,6 +54,14 @@
   // Если на странице есть размеченный контент (main/article/[role=main])
   // с >= READING_MIN_SECTIONS параграфами/заголовками — считаем «прочитанные»
   // секции через IntersectionObserver. Иначе fallback на maxScrollDepth.
+  //
+  // ВНИМАНИЕ: totalSections — «скользящее состояние», не финальное значение.
+  // На SPA первая попытка setupReadingTracker найдёт <5 секций (ещё нет
+  // гидрации) и оставит totalSections = 0; MutationObserver через какое-то
+  // время позовёт setup ещё раз, и totalSections станет нормальным. То есть
+  // в любом коде, который читает totalSections, нужно помнить, что значение
+  // может измениться позже в той же сессии. Сейчас это читает только
+  // readingProgress() в момент срабатывания цели — там это корректно.
   var readSections = 0;
   var totalSections = 0;
   var READING_MIN_SECTIONS = 5;
