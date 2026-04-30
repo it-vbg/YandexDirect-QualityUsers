@@ -14,6 +14,8 @@
   var LAST_VISIT_AT_KEY = 'interested_user_last_visit_at';
   var QUALITY_TOTAL_KEY = 'interested_user_quality_total';
   var QUALITY_SCORE_MAX_KEY = 'interested_user_quality_score_max';
+  var INTERNAL_NAV_KEY = 'interested_user_internal_nav';     // { count, ts } TTL 5 мин
+  var INTERNAL_NAV_TTL_MS = 5 * 60 * 1000;
   // 30 минут — это и стандартный visit-gap в самой Яндекс Метрике, поэтому
   // visitCount у нас совпадает с тем, как Метрика считает визиты.
   var SAME_SESSION_GAP_MS = 30 * 60 * 1000;
@@ -33,6 +35,27 @@
   var goalReachedThisSession = false;
   var maxScrollDepth = 0;             // Доля прокрученного документа от 0 до 1
   var copied = false;                 // Был ли copy-event (сильный сигнал чтения)
+  var exitIntent = false;             // Курсор уехал за верхнюю границу окна
+
+  // ===== Скролл-скорость (анализ «пролетел не читая») =====
+  var scrollFastDistance = 0;         // px, проеханные на скорости > FAST_SCROLL_PPS
+  var scrollTotalDistance = 0;        // px, проеханные за всю сессию
+  var FAST_SCROLL_PPS = 3000;         // выше этого — «полёт», не чтение
+  var FAST_SCROLL_RATIO = 0.7;        // если > 70% пути проеханы быстро — штрафуем
+  var FAST_SCROLL_MIN_TOTAL = 1000;   // штраф включается только если есть существенный путь
+
+  // ===== Внутренняя навигация (с persistence через localStorage) =====
+  // На multi-page сайтах счётчик в памяти умирает с перезагрузкой; пишем
+  // в storage с TTL, на следующей странице читаем как стартовое значение.
+  var internalNavClicks = 0;
+
+  // ===== Чтение по секциям (replacement для глобальной глубины) =====
+  // Если на странице есть размеченный контент (main/article/[role=main])
+  // с >= READING_MIN_SECTIONS параграфами/заголовками — считаем «прочитанные»
+  // секции через IntersectionObserver. Иначе fallback на maxScrollDepth.
+  var readSections = 0;
+  var totalSections = 0;
+  var READING_MIN_SECTIONS = 5;
 
   // Счётчик видимого времени: тикает только пока вкладка в foreground.
   var visibleTimeAccumulated = 0;
@@ -137,6 +160,31 @@
     return n;
   }
   var visitCount = bumpVisitCount();
+
+  // Подхватываем internalNavClicks из предыдущей страницы, если запись свежая.
+  // Старее TTL — игнорируем (это уже не «текущая навигация», а история).
+  function readInternalNavFromStorage() {
+    if (!supportsLocalStorage()) return 0;
+    var raw = localStorage.getItem(INTERNAL_NAV_KEY);
+    if (!raw) return 0;
+    try {
+      var parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.count === 'number' && typeof parsed.ts === 'number') {
+        if (Date.now() - parsed.ts < INTERNAL_NAV_TTL_MS) return parsed.count;
+      }
+    } catch (e) { /* битая запись — обнуляем */ }
+    return 0;
+  }
+  internalNavClicks = readInternalNavFromStorage();
+
+  function persistInternalNav() {
+    if (!supportsLocalStorage()) return;
+    if (internalNavClicks <= 0) return;
+    localStorage.setItem(INTERNAL_NAV_KEY, JSON.stringify({
+      count: internalNavClicks,
+      ts: Date.now()
+    }));
+  }
 
   // ===== Время видимости и активности =====
   function getVisibleTime() {
@@ -258,8 +306,11 @@
   // Аналогично для прокрутки. У человека длинное чтение даёт ровные тики
   // колеса/трекпада с близкими дельтами — поэтому только малой дисперсии
   // мало, требуем И малое среднее (бот «дёргает» страницу мелкими шагами).
+  // Здесь же замеряем скорость скролла (px/sec) и копим долю «быстрого»
+  // пути для штрафа в скоринге — см. fastScrollPenalty().
   function watchScrollVariance() {
     var lastY;
+    var lastScrollAt = 0;
     var history = [];
     var maxLen = 20;
 
@@ -267,6 +318,7 @@
       hasScrolled = true;
 
       // Глубина прочтения: максимум за сессию, в долях документа.
+      // Используется как fallback, если контентных секций <READING_MIN_SECTIONS.
       var doc = document.documentElement || document.body;
       var total = doc ? doc.scrollHeight : 0;
       if (total > 0) {
@@ -276,6 +328,19 @@
       }
 
       var y = window.scrollY || window.pageYOffset;
+      var now = Date.now();
+
+      // Скорость и доля «быстрого» пути.
+      if (lastY !== undefined && lastScrollAt > 0) {
+        var dy = Math.abs(y - lastY);
+        var dt = now - lastScrollAt;
+        if (dt > 0 && dy > 0) {
+          var pps = dy * 1000 / dt;
+          scrollTotalDistance += dy;
+          if (pps > FAST_SCROLL_PPS) scrollFastDistance += dy;
+        }
+      }
+
       if (lastY !== undefined) {
         history.push(Math.abs(y - lastY));
         if (history.length > maxLen) history.shift();
@@ -293,7 +358,19 @@
         }
       }
       lastY = y;
+      lastScrollAt = now;
     }, { passive: true });
+  }
+
+  // Штраф за «полёт без чтения»: если существенная часть проеханного пути
+  // была на скорости > FAST_SCROLL_PPS — это не чтение, а пролистывание.
+  // Один трекпадный флик (резкий жест) даёт малый fastDistance относительно
+  // последующего медленного скролла — поэтому считаем долю, а не штрафуем
+  // за каждый сэмпл.
+  function fastScrollPenalty() {
+    if (scrollTotalDistance < FAST_SCROLL_MIN_TOTAL) return 0;
+    if (scrollFastDistance / scrollTotalDistance > FAST_SCROLL_RATIO) return 10;
+    return 0;
   }
 
   // Аномально высокая частота дискретных пользовательских событий за минуту.
@@ -318,6 +395,79 @@
     window.addEventListener('touchstart', tick, { passive: true });
   }
 
+  // ===== Чтение по секциям =====
+  // Если в контентной зоне (main/article/[role=main]) есть достаточное число
+  // секций — мерим время каждого <p>/<h2>/<h3>/<li> в viewport. Зачёт даём
+  // когда секция набрала dwell, пропорциональный её длине (200 мс на слово,
+  // не меньше 800 мс): на коротком абзаце 1-2 строки человек проводит
+  // 800-1200 мс, и фиксированный 1500 мс пропускал бы половину легитимного
+  // чтения. На длинном абзаце 50 слов — 10 сек.
+  //
+  // Если контентных секций < READING_MIN_SECTIONS — fallback на старую
+  // глобальную глубину (см. readingScore()).
+  function setupReadingTracker() {
+    if (typeof window.IntersectionObserver !== 'function') return;
+
+    var selector = 'main p, main h2, main h3, main li, ' +
+                   'article p, article h2, article h3, article li, ' +
+                   '[role="main"] p, [role="main"] h2, [role="main"] h3, [role="main"] li';
+    var els;
+    try {
+      els = document.querySelectorAll(selector);
+    } catch (e) { return; }
+
+    totalSections = els.length;
+    if (totalSections < READING_MIN_SECTIONS) {
+      totalSections = 0;  // явно сигналим fallback в readingScore()
+      return;
+    }
+
+    var dwell = {};       // id → { since, total, counted, threshold }
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      el.setAttribute('data-qu-sid', String(i));
+      var words = (el.textContent || '').split(/\s+/).length;
+      dwell[i] = {
+        since: 0,
+        total: 0,
+        counted: false,
+        threshold: Math.max(800, words * 200)
+      };
+    }
+
+    var io = new IntersectionObserver(function (entries) {
+      for (var k = 0; k < entries.length; k++) {
+        var e = entries[k];
+        var sid = e.target.getAttribute('data-qu-sid');
+        if (sid === null) continue;
+        var d = dwell[sid];
+        if (!d) continue;
+
+        if (e.isIntersecting) {
+          d.since = Date.now();
+        } else if (d.since) {
+          d.total += Date.now() - d.since;
+          d.since = 0;
+          if (!d.counted && d.total >= d.threshold) {
+            d.counted = true;
+            readSections++;
+          }
+        }
+      }
+    }, { threshold: 0.5 });
+
+    for (var j = 0; j < els.length; j++) io.observe(els[j]);
+  }
+
+  // Доля прочитанных секций / fallback на глобальную глубину.
+  // Возвращает значение в диапазоне 0..1, которое умножается на 20 в скоре.
+  function readingProgress() {
+    if (totalSections >= READING_MIN_SECTIONS) {
+      return Math.min(readSections / totalSections, 1);
+    }
+    return Math.min(maxScrollDepth, 1);   // fallback
+  }
+
   // ===== Скоринг =====
   // Каждый сигнал даёт нормированный вклад 0..max. Слабые сигналы могут
   // компенсироваться сильными (долгое чтение без скролла, или короткий визит
@@ -333,7 +483,7 @@
 
     s += Math.min(visibleSec / 60, 1) * 25;          // до 25 за 60 сек видимого
     s += Math.min(activeSec / 30, 1) * 25;           // до 25 за 30 сек активного
-    s += Math.min(maxScrollDepth, 1) * 20;           // до 20 за 100% глубины
+    s += readingProgress() * 20;                     // до 20 за прочитанные секции (или fallback на глубину)
 
     // Selection и copy — два сигнала чтения, copy сильнее. Берём максимум,
     // а не сумму: copy почти всегда сопровождается selection, и складывая
@@ -344,6 +494,15 @@
 
     if (visitCount >= 2) s += 5;
     if (visitCount >= 5) s += 5;
+
+    // Внутренняя навигация — сильный сигнал глубокого интереса. На MPA
+    // персистится в storage между страницами, поэтому даже на первой
+    // странице после клика бонус начислится.
+    if (internalNavClicks >= 1) s += 10;
+    if (internalNavClicks >= 3) s += 5;
+
+    s -= fastScrollPenalty();                        // штраф за «пролетел не читая»
+    if (s < 0) s = 0;
     return s > 100 ? 100 : s;                         // нормируем строго в 0..100
   }
 
@@ -388,9 +547,13 @@
       visible_time_sec: Math.round(visibleMs / 1000),
       active_time_sec: Math.round(activeTime / 1000),
       scroll_depth_pct: Math.round(maxScrollDepth * 100),
+      reading_pct: Math.round(readingProgress() * 100),
       visit_count: visitCount,
       text_selected: textSelected ? 1 : 0,
-      copied: copied ? 1 : 0
+      copied: copied ? 1 : 0,
+      internal_nav: internalNavClicks,
+      exit_intent: exitIntent ? 1 : 0,
+      fast_scroll_pen: fastScrollPenalty()
     };
 
     // params как параметры цели — для отчёта «Конверсии» в Метрике.
@@ -424,7 +587,9 @@
     window.ym(METRIKA_COUNTER_ID, 'userParams', {
       quality_score_last: roundedScore,
       quality_score_max: maxScore,
-      quality_visits_total: totalQuality
+      quality_visits_total: totalQuality,
+      quality_internal_nav_last: internalNavClicks,
+      quality_reading_pct_last: Math.round(readingProgress() * 100)
     });
 
     incrementDailyCount();
@@ -524,6 +689,34 @@
 
   document.addEventListener('copy', handleCopy);
 
+  // Внутренняя навигация: клик по <a[href]> с тем же origin. Считаем только
+  // настоящие переходы (не якорные #fragment — они не покидают страницу).
+  document.addEventListener('click', function (e) {
+    var a = e.target && e.target.closest && e.target.closest('a[href]');
+    if (!a || !a.host) return;
+    if (a.host !== location.host) return;            // внешняя ссылка
+    if (a.hash && a.pathname === location.pathname) return;  // якорь на той же странице
+    internalNavClicks++;
+    bumpActivity();
+  }, { passive: true });
+
+  // Exit intent: курсор уехал за верхнюю границу окна. Сильный сигнал «уходит,
+  // изучив», в скоринг не закладываем (легко пересолить), но пишем как
+  // отдельный параметр цели/userParams для сегментации.
+  document.addEventListener('mouseleave', function (e) {
+    if (e.clientY <= 0) exitIntent = true;
+  });
+
+  // Перед уходом со страницы сохраняем internalNavClicks в storage,
+  // чтобы на следующей MPA-странице счётчик подхватился. Дублируем
+  // pagehide и visibilitychange→hidden (последний срабатывает раньше
+  // на мобильных, где pagehide может не успеть).
+  function persistOnExit() { persistInternalNav(); }
+  window.addEventListener('pagehide', persistOnExit);
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') persistOnExit();
+  });
+
   // selectionchange стреляет десятки раз в секунду при ведении выделения
   // мышью. Дебаунсим на 250 мс, чтобы trackInterestedUser/getDailyCount/
   // calculateScore не вызывались каждый кадр.
@@ -540,5 +733,14 @@
   watchMouseVariance();
   watchScrollVariance();
   watchRequestFrequency();
+
+  // Reading tracker зависит от DOM с контентом. Если скрипт выполняется до
+  // парсинга <body>, querySelectorAll вернёт 0 элементов и мы зря провалимся
+  // в fallback. Запускаем после DOMContentLoaded или сразу, если уже готов.
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', setupReadingTracker);
+  } else {
+    setupReadingTracker();
+  }
 })();
 </script>

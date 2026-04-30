@@ -37,25 +37,40 @@ The goal fires inside `trackInterestedUser()` when **all** of these are true:
 |---|---|---|
 | `visibleTime` | up to 25 | 60s |
 | `activeTime` | up to 25 | 30s |
-| `maxScrollDepth` | up to 20 | 100% |
+| `readingProgress()` | up to 20 | 100% sections read (or fallback to `maxScrollDepth` if `< READING_MIN_SECTIONS` content sections found) |
 | `textSelected` OR `copied` | +10 / +15 | **max, not sum** — `copied` overrides `textSelected` (copy almost always co-occurs with selection, so summing them double-counts the same act) |
 | `visitCount >= 2` | +5 | binary |
 | `visitCount >= 5` | +5 | binary |
+| `internalNavClicks >= 1` | +10 | binary, persisted across MPA navigations via storage |
+| `internalNavClicks >= 3` | +5 | binary |
+| Fast-scroll penalty | -10 | applied only when `scrollFastDistance / scrollTotalDistance > 0.7 && scrollTotalDistance > 1000px`. Designed to ignore single trackpad flicks but punish "scrolled-without-reading" sessions. |
 
-Score is clamped to 0..100 by the function itself. `GOAL_SCORE_THRESHOLD = 60` is a starting guess — once you have data in Metrika, look at the `score` parameter distribution and adjust. Lowering it = more conversions, looser quality. Raising it = fewer conversions, tighter quality.
+Score is clamped to 0..100 by the function itself.
+
+### Reading tracker (replaces raw scroll-depth when content is structured)
+
+`setupReadingTracker()` queries `main p, main h2, main h3, main li, article ..., [role="main"] ...` — deliberately scoped to content zones to avoid counting nav/footer/sidebar `<li>` as "read sections". If `>= READING_MIN_SECTIONS` (5) elements are found, an `IntersectionObserver` tracks dwell time per section. A section is "read" when accumulated dwell ≥ adaptive threshold = `max(800ms, words * 200ms)` — short paragraphs (1–2 lines) qualify in <1s, long paragraphs need proportionally more time. **If the content scope yields fewer than 5 sections, we fall back to `maxScrollDepth` so landings still get a scroll signal.**
+
+Tracker is started on `DOMContentLoaded` (or immediately if document is already parsed) — running `querySelectorAll` on a not-yet-parsed body returns 0 elements and falsely triggers fallback.
+
+### Internal navigation persistence
+
+Click on `<a[href]>` with the same origin (excluding pure `#fragment` anchors) increments `internalNavClicks`. On `pagehide` AND `visibilitychange→hidden` (mobile-safe), the counter is written to `localStorage` under `interested_user_internal_nav` as `{ count, ts }`. On script load, if the entry is younger than 5 minutes, it seeds `internalNavClicks` so the bonus carries across MPA page transitions. `visibilitychange→hidden` is dual-fired on purpose — on iOS Safari the page can be killed before `pagehide` runs. `GOAL_SCORE_THRESHOLD = 60` is a starting guess — once you have data in Metrika, look at the `score` parameter distribution and adjust. Lowering it = more conversions, looser quality. Raising it = fewer conversions, tighter quality.
 
 ### Goal parameters
 
 When the goal fires, two `ym()` calls happen back-to-back:
 
 1. `ym(id, 'reachGoal', target, params)` — params attached to this goal achievement, visible in Metrika's "Конверсии" report:
-   - `score`, `visible_time_sec`, `active_time_sec`, `scroll_depth_pct`, `visit_count`, `text_selected`, `copied`.
+   - `score`, `visible_time_sec`, `active_time_sec`, `scroll_depth_pct`, `reading_pct`, `visit_count`, `text_selected`, `copied`, `internal_nav`, `exit_intent`, `fast_scroll_pen`.
 2. `ym(id, 'userParams', { quality_score_last, quality_score_max, quality_visits_total })` — bound to ClientID, **available for Audience segmentation in Yandex Audiences / Direct look-alike**. This is the channel that makes the data useful for ad targeting; goal-level params alone don't reach the audience builder. Don't remove it.
 
    `userParams` keeps only the **last** value per key, so we deliberately store **aggregates over time** rather than the current snapshot:
    - `quality_score_last` — score from this latest qualification (just for diagnostics).
    - `quality_score_max` — max score ever achieved by this browser, persisted in `interested_user_quality_score_max`.
    - `quality_visits_total` — total number of times this browser has ever qualified, persisted in `interested_user_quality_total`.
+   - `quality_internal_nav_last` — internal navigation clicks in the qualifying session (snapshot, not aggregate — but useful for filtering "deep navigators" in audience builder).
+   - `quality_reading_pct_last` — reading progress at qualification (snapshot).
 
    These aggregates are stronger features for look-alike than a snapshot would be: a user who qualified 7 times with a peak score of 88 is a much better seed than one who qualified once with a current score of 88.
 
@@ -87,7 +102,7 @@ The daily counter is stored as `{ date: 'YYYY-MM-DD', count: N }` under `interes
 - ES5 only (`var`, `function` expressions, no arrow functions, no `let`/`const`). The file is pasted into arbitrary sites via МТЯ and must run in the broadest possible browser baseline.
 - Comments are in Russian — match the existing language when adding new ones.
 - Keep the wrapping `<script>...</script>` tags intact (the README's install flow assumes the file can be copy-pasted directly into a Custom HTML tag in МТЯ).
-- The whole script runs inside an IIFE — never expose state on `window` unless you have a strong reason. Five localStorage keys (`interested_user_daily_counter`, `interested_user_visit_count`, `interested_user_last_visit_at`, `interested_user_quality_total`, `interested_user_quality_score_max`) are the only persistent surface.
+- The whole script runs inside an IIFE — never expose state on `window` unless you have a strong reason. Six localStorage keys (`interested_user_daily_counter`, `interested_user_visit_count`, `interested_user_last_visit_at`, `interested_user_quality_total`, `interested_user_quality_score_max`, `interested_user_internal_nav`) are the only persistent surface.
 
 ## Known limitations (documented, not bugs)
 
